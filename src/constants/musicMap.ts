@@ -31,9 +31,8 @@ export const MUSIC_MAP: Record<string, string[]> = {
 
 /**
  * Filename → bundled asset module. Empty until MP3s are added (see above).
- * `any` is the type `require()` returns for static assets in RN.
+ * The value type mirrors what `require()` returns for a static asset in RN.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const MUSIC_SOURCES: Record<string, any> = {
+export const MUSIC_SOURCES: Record<string, number> = {
   // "battle_epic.mp3": require("../../assets/music/battle_epic.mp3"),
 };

@@ -47,6 +47,7 @@ export function initDB(): void {
       coverUrl TEXT,
       genre TEXT,
       tags TEXT,              -- JSON array string
+      chapterTitles TEXT,     -- JSON array of chapter titles (TOC)
       lastPosition TEXT,      -- JSON: { chapterIndex, scrollY }
       totalChapters INTEGER,
       addedAt INTEGER
@@ -64,8 +65,9 @@ export function initDB(): void {
       id TEXT PRIMARY KEY,
       bookId TEXT NOT NULL,
       chapterIndex INTEGER,
+      paragraphIndex INTEGER,
       scrollY REAL,
-      highlight TEXT,
+      highlight TEXT,         -- excerpt of the bookmarked paragraph
       note TEXT,
       createdAt INTEGER
     );
@@ -137,6 +139,27 @@ export function initDB(): void {
   `);
 }
 
+/**
+ * Wipe all data by dropping every table and recreating the schema. Used by the
+ * Settings "Clear all data" action for testing from a clean slate. Keeps the
+ * same DB handle valid (no close/reopen, so no reload needed for the DB itself).
+ */
+export function resetDatabase(): void {
+  db.execSync(`
+    DROP TABLE IF EXISTS series;
+    DROP TABLE IF EXISTS books;
+    DROP TABLE IF EXISTS book_series;
+    DROP TABLE IF EXISTS bookmarks;
+    DROP TABLE IF EXISTS ai_cache;
+    DROP TABLE IF EXISTS power_stages;
+    DROP TABLE IF EXISTS characters;
+    DROP TABLE IF EXISTS character_events;
+    DROP TABLE IF EXISTS world_lore;
+    DROP TABLE IF EXISTS book_content_fts;
+  `);
+  initDB();
+}
+
 // ---------------------------------------------------------------------------
 // Books
 // ---------------------------------------------------------------------------
@@ -149,12 +172,13 @@ export function saveBook(book: {
   coverUrl?: string;
   genre?: string;
   tags?: string[];
+  chapterTitles?: string[];
   totalChapters?: number;
 }): string {
   const id = genId("book");
   db.runSync(
-    `INSERT INTO books (id, title, author, filePath, format, coverUrl, genre, tags, totalChapters, addedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO books (id, title, author, filePath, format, coverUrl, genre, tags, chapterTitles, totalChapters, addedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       book.title,
@@ -164,6 +188,7 @@ export function saveBook(book: {
       book.coverUrl ?? "",
       book.genre ?? "",
       JSON.stringify(book.tags ?? []),
+      JSON.stringify(book.chapterTitles ?? []),
       book.totalChapters ?? 0,
       Date.now(),
     ],
@@ -175,6 +200,7 @@ function hydrateBook(row: BookRow): Book {
   return {
     ...row,
     tags: safeParse<string[]>(row.tags, []),
+    chapterTitles: safeParse<string[]>(row.chapterTitles, []),
     lastPosition: row.lastPosition
       ? safeParse<ReadingPosition>(row.lastPosition, { chapterIndex: 0, scrollY: 0 })
       : undefined,
@@ -222,12 +248,13 @@ export function deleteBook(bookId: string): void {
 export function addBookmark(bookmark: Omit<Bookmark, "id" | "createdAt">): string {
   const id = genId("bm");
   db.runSync(
-    `INSERT INTO bookmarks (id, bookId, chapterIndex, scrollY, highlight, note, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO bookmarks (id, bookId, chapterIndex, paragraphIndex, scrollY, highlight, note, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       bookmark.bookId,
       bookmark.chapterIndex,
+      bookmark.paragraphIndex ?? 0,
       bookmark.scrollY,
       bookmark.highlight ?? "",
       bookmark.note ?? "",
@@ -288,22 +315,46 @@ export function clearBookIndex(bookId: string): void {
   db.runSync("DELETE FROM book_content_fts WHERE bookId = ?", [bookId]);
 }
 
+/**
+ * Read a book's chapters back, in order. The FTS table doubles as our chapter
+ * store: `indexChapter` saved the original (un-normalized) text per chapter, so
+ * the reader can rehydrate without re-parsing the source file.
+ */
+export function getChapters(bookId: string): string[] {
+  return db
+    .getAllSync<{ content: string }>(
+      "SELECT content FROM book_content_fts WHERE bookId = ? ORDER BY chapterIndex ASC",
+      [bookId],
+    )
+    .map((r) => r.content);
+}
+
 export interface SearchHit {
   bookId: string;
   chapterIndex: number;
   snippet: string;
 }
 
-export function searchContent(query: string): SearchHit[] {
-  const normalized = normalizeVietnamese(query);
-  if (!normalized) return [];
+export function searchContent(query: string, bookId?: string): SearchHit[] {
+  // Normalize (diacritic-insensitive), then tokenize into bare alphanumeric
+  // terms. Raw user input can contain FTS5 operators (", *, :, -, AND, …) that
+  // throw a syntax error; we rebuild a safe AND-of-prefix query instead.
+  const tokens = normalizeVietnamese(query).match(/[a-z0-9]+/g);
+  if (!tokens || tokens.length === 0) return [];
+  const ftsQuery = tokens.map((t) => `${t}*`).join(" ");
+
+  const where = bookId
+    ? "content_normalized MATCH ? AND bookId = ?"
+    : "content_normalized MATCH ?";
+  const params = bookId ? [ftsQuery, bookId] : [ftsQuery];
+
   return db.getAllSync<SearchHit>(
     `SELECT bookId, chapterIndex,
             snippet(book_content_fts, 3, '[', ']', '...', 20) AS snippet
      FROM book_content_fts
-     WHERE content_normalized MATCH ?
+     WHERE ${where}
      LIMIT 100`,
-    [normalized],
+    params,
   );
 }
 
@@ -575,6 +626,8 @@ export interface Book {
   coverUrl?: string;
   genre?: string;
   tags: string[];
+  /** Per-chapter TOC titles, parallel to chapter indices. */
+  chapterTitles: string[];
   lastPosition?: ReadingPosition;
   totalChapters?: number;
   addedAt: number;
@@ -584,7 +637,10 @@ export interface Bookmark {
   id: string;
   bookId: string;
   chapterIndex: number;
+  /** Index of the bookmarked paragraph within the chapter. */
+  paragraphIndex: number;
   scrollY: number;
+  /** Excerpt of the bookmarked paragraph, shown in the bookmark list. */
   highlight?: string;
   note?: string;
   createdAt: number;
@@ -656,8 +712,9 @@ export interface WorldLore {
 }
 
 // Raw row shapes (TEXT columns hold JSON; hydrated above).
-type BookRow = Omit<Book, "tags" | "lastPosition"> & {
+type BookRow = Omit<Book, "tags" | "chapterTitles" | "lastPosition"> & {
   tags: string | null;
+  chapterTitles: string | null;
   lastPosition: string | null;
 };
 type PowerStageRow = Omit<PowerStage, "subStages"> & { subStages: string | null };
