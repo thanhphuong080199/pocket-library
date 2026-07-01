@@ -81,6 +81,18 @@ export function initDB(): void {
       PRIMARY KEY (bookId, cacheKey)
     );
 
+    -- Knowledge-base analysis checkpoint (one in-flight/paused job per series).
+    -- Lets a whole-book pass resume after a rate-limit pause or app close.
+    CREATE TABLE IF NOT EXISTS kb_analysis (
+      seriesId TEXT PRIMARY KEY,
+      bookId TEXT,
+      volumeNumber INTEGER,
+      nextChunk INTEGER,        -- index of the next chunk to process
+      totalChunks INTEGER,
+      status TEXT,              -- 'running' | 'paused' | 'error' | 'done'
+      updatedAt INTEGER
+    );
+
     -- Power system stages — accumulate across volumes (series-scoped).
     CREATE TABLE IF NOT EXISTS power_stages (
       id TEXT PRIMARY KEY,
@@ -106,6 +118,10 @@ export function initDB(): void {
       skills TEXT,              -- JSON array
       relationships TEXT,       -- JSON array of { name, relation }
       backstory TEXT,
+      gender TEXT,
+      role TEXT,                -- 'protagonist' | 'antagonist' | 'supporting' | ...
+      personality TEXT,
+      status TEXT,              -- 'alive' | 'dead' | 'unknown' | ...
       imageUrl TEXT,
       lastSeenVolume INTEGER,
       lastSeenChapter INTEGER
@@ -151,6 +167,7 @@ export function resetDatabase(): void {
     DROP TABLE IF EXISTS book_series;
     DROP TABLE IF EXISTS bookmarks;
     DROP TABLE IF EXISTS ai_cache;
+    DROP TABLE IF EXISTS kb_analysis;
     DROP TABLE IF EXISTS power_stages;
     DROP TABLE IF EXISTS characters;
     DROP TABLE IF EXISTS character_events;
@@ -409,6 +426,79 @@ export function getSeriesIdForBook(bookId: string): string | null {
   return row?.seriesId ?? null;
 }
 
+/** Volume number of a book within its series (1 for standalone / unknown). */
+export function getBookVolume(bookId: string): number {
+  const row = db.getFirstSync<{ volumeNumber: number }>(
+    "SELECT volumeNumber FROM book_series WHERE bookId = ? LIMIT 1",
+    [bookId],
+  );
+  return row?.volumeNumber ?? 1;
+}
+
+/**
+ * Wipe a series' accumulated knowledge base (power stages, characters + their
+ * events, lore). Used when the user re-analyzes to rebuild from scratch.
+ */
+export function clearSeriesKB(seriesId: string): void {
+  db.runSync("DELETE FROM power_stages WHERE seriesId = ?", [seriesId]);
+  db.runSync("DELETE FROM character_events WHERE seriesId = ?", [seriesId]);
+  db.runSync("DELETE FROM characters WHERE seriesId = ?", [seriesId]);
+  db.runSync("DELETE FROM world_lore WHERE seriesId = ?", [seriesId]);
+}
+
+// ---------------------------------------------------------------------------
+// KB analysis checkpoint (resume a whole-book pass across pauses / app close)
+// ---------------------------------------------------------------------------
+
+export type KBAnalysisStatus = "running" | "paused" | "error" | "done";
+
+export interface KBAnalysisState {
+  seriesId: string;
+  bookId: string;
+  volumeNumber: number;
+  nextChunk: number;
+  totalChunks: number;
+  status: KBAnalysisStatus;
+  updatedAt: number;
+}
+
+export function getAnalysisState(seriesId: string): KBAnalysisState | null {
+  return (
+    db.getFirstSync<KBAnalysisState>("SELECT * FROM kb_analysis WHERE seriesId = ?", [seriesId]) ??
+    null
+  );
+}
+
+export function setAnalysisState(state: Omit<KBAnalysisState, "updatedAt">): void {
+  db.runSync(
+    `INSERT OR REPLACE INTO kb_analysis
+       (seriesId, bookId, volumeNumber, nextChunk, totalChunks, status, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      state.seriesId,
+      state.bookId,
+      state.volumeNumber,
+      state.nextChunk,
+      state.totalChunks,
+      state.status,
+      Date.now(),
+    ],
+  );
+}
+
+export function clearAnalysisState(seriesId: string): void {
+  db.runSync("DELETE FROM kb_analysis WHERE seriesId = ?", [seriesId]);
+}
+
+/** Any analysis left mid-flight (running/paused) — used to offer resume on launch. */
+export function getInterruptedAnalysis(): KBAnalysisState | null {
+  return (
+    db.getFirstSync<KBAnalysisState>(
+      "SELECT * FROM kb_analysis WHERE status IN ('running', 'paused') ORDER BY updatedAt DESC LIMIT 1",
+    ) ?? null
+  );
+}
+
 export function getBooksInSeries(seriesId: string): Book[] {
   return db
     .getAllSync<BookRow>(
@@ -467,6 +557,10 @@ export function insertCharacter(char: {
   skills?: string[];
   relationships?: Relationship[];
   backstory?: string;
+  gender?: string;
+  role?: string;
+  personality?: string;
+  status?: string;
   imageUrl?: string;
   lastSeenVolume?: number;
   lastSeenChapter?: number;
@@ -474,8 +568,8 @@ export function insertCharacter(char: {
   const id = genId("char");
   db.runSync(
     `INSERT INTO characters
-       (id, seriesId, name, aliases, appearance, currentPower, faction, skills, relationships, backstory, imageUrl, lastSeenVolume, lastSeenChapter)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, seriesId, name, aliases, appearance, currentPower, faction, skills, relationships, backstory, gender, role, personality, status, imageUrl, lastSeenVolume, lastSeenChapter)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       char.seriesId,
@@ -487,12 +581,74 @@ export function insertCharacter(char: {
       JSON.stringify(char.skills ?? []),
       JSON.stringify(char.relationships ?? []),
       char.backstory ?? "",
+      char.gender ?? "",
+      char.role ?? "",
+      char.personality ?? "",
+      char.status ?? "",
       char.imageUrl ?? "",
       char.lastSeenVolume ?? 0,
       char.lastSeenChapter ?? 0,
     ],
   );
   return id;
+}
+
+/**
+ * Partial-update a character's enrichable fields. Only provided keys are
+ * written (undefined keys are left untouched), so the KB merge can accrete
+ * detail across chunks/volumes without wiping earlier data. Array fields are
+ * JSON-encoded.
+ */
+export function updateCharacter(
+  id: string,
+  fields: Partial<{
+    aliases: string[];
+    appearance: string;
+    currentPower: string;
+    faction: string;
+    skills: string[];
+    relationships: Relationship[];
+    backstory: string;
+    gender: string;
+    role: string;
+    personality: string;
+    status: string;
+    imageUrl: string;
+    lastSeenVolume: number;
+    lastSeenChapter: number;
+  }>,
+): void {
+  const sets: string[] = [];
+  const params: (string | number)[] = [];
+  const set = (col: string, val: string | number) => {
+    sets.push(`${col} = ?`);
+    params.push(val);
+  };
+
+  if (fields.aliases !== undefined) set("aliases", JSON.stringify(fields.aliases));
+  if (fields.skills !== undefined) set("skills", JSON.stringify(fields.skills));
+  if (fields.relationships !== undefined) set("relationships", JSON.stringify(fields.relationships));
+  const scalarKeys = [
+    "appearance",
+    "currentPower",
+    "faction",
+    "backstory",
+    "gender",
+    "role",
+    "personality",
+    "status",
+    "imageUrl",
+    "lastSeenVolume",
+    "lastSeenChapter",
+  ] as const;
+  for (const key of scalarKeys) {
+    const val = fields[key];
+    if (val !== undefined) set(key, val);
+  }
+
+  if (sets.length === 0) return;
+  params.push(id);
+  db.runSync(`UPDATE characters SET ${sets.join(", ")} WHERE id = ?`, params);
 }
 
 /** Find a character in a series by name (or alias). Returns its id or null. */
@@ -513,10 +669,27 @@ function hydrateCharacter(row: CharacterRow): Character {
   };
 }
 
+/**
+ * Characters ordered by plot importance: main cast first, side characters last.
+ * Primary key is `role` (protagonist → antagonist → supporting → unknown, with
+ * common Vietnamese synonyms), then how often they appear (event count desc),
+ * then name. Role strings come from the AI and may vary, so match loosely.
+ */
 export function getCharacters(seriesId: string): Character[] {
   return db
     .getAllSync<CharacterRow>(
-      "SELECT * FROM characters WHERE seriesId = ? ORDER BY name ASC",
+      `SELECT * FROM characters WHERE seriesId = ?
+       ORDER BY
+         CASE
+           WHEN lower(role) LIKE '%protagonist%' OR lower(role) LIKE '%main%'
+             OR lower(role) LIKE '%chính%' THEN 0
+           WHEN lower(role) LIKE '%antagonist%' OR lower(role) LIKE '%villain%'
+             OR lower(role) LIKE '%phản%' THEN 1
+           WHEN lower(role) LIKE '%support%' OR lower(role) LIKE '%phụ%' THEN 2
+           ELSE 3
+         END ASC,
+         (SELECT COUNT(*) FROM character_events e WHERE e.characterId = characters.id) DESC,
+         name ASC`,
       [seriesId],
     )
     .map(hydrateCharacter);
@@ -680,6 +853,10 @@ export interface Character {
   skills: string[];
   relationships: Relationship[];
   backstory?: string;
+  gender?: string;
+  role?: string;
+  personality?: string;
+  status?: string;
   imageUrl?: string;
   lastSeenVolume?: number;
   lastSeenChapter?: number;

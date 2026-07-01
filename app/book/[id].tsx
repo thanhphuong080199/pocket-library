@@ -5,8 +5,10 @@ import { useEffect, useMemo } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { useBookAI } from "@/src/hooks/useBookAI";
-import { getBook, getChapters } from "@/src/services/db";
+import { useBookAI, type AIFeature } from "@/src/hooks/useBookAI";
+import { useSeriesKB } from "@/src/hooks/useSeriesKB";
+import { cancelAnalysis } from "@/src/services/kbRunner";
+import { getBook, getChapters, type Character, type PowerStage } from "@/src/services/db";
 import { useBookStore } from "@/src/store/bookStore";
 import { THEMES, useSettingsStore } from "@/src/store/settingsStore";
 
@@ -22,6 +24,7 @@ export default function BookDetailScreen() {
   const book = useMemo(() => (id ? getBook(id) : null), [id]);
   const chapters = useMemo(() => (book ? getChapters(book.id) : []), [book]);
   const ai = useBookAI(book, chapters);
+  const kb = useSeriesKB(book);
 
   // Load this book into the reader context so Read / Search / Bookmarks work.
   useEffect(() => {
@@ -43,6 +46,9 @@ export default function BookDetailScreen() {
     : Array.from({ length: book.totalChapters ?? 0 }, (_, i) => `Chapter ${i + 1}`);
   const resumeChapter = book.lastPosition?.chapterIndex ?? 0;
   const hasProgress = resumeChapter > 0 || (book.lastPosition?.scrollY ?? 0) > 0;
+  const kbRunning = kb.status === "running";
+  const kbPaused = kb.status === "paused" || kb.canResume;
+  const kbHasData = kb.kb.powerStages.length > 0 || kb.kb.characters.length > 0;
 
   const read = (chapterIndex?: number) => {
     if (chapterIndex != null) jumpTo(chapterIndex, 0);
@@ -105,54 +111,107 @@ export default function BookDetailScreen() {
         </View>
 
         {/* Tags (AI auto-tagging) */}
-        <Section title="Tags" colors={colors}>
-          {ai.tags.length > 0 && (
+        <AISection
+          title="Tags"
+          feature={ai.tags}
+          colors={colors}
+          isEmpty={(t) => t.length === 0}
+          emptyHint="No tags yet — analyze to auto-tag genre & mood (also picks background music)."
+          noun="tags">
+          {(tags) => (
             <View style={styles.tagRow}>
-              {ai.tags.map((t) => (
+              {tags.map((t) => (
                 <View key={t} style={[styles.tag, { borderColor: colors.muted }]}>
                   <Text style={{ color: colors.text, fontSize: 13 }}>{t}</Text>
                 </View>
               ))}
             </View>
           )}
+        </AISection>
 
-          <Pressable
-            onPress={ai.tags.length > 0 ? ai.regenerate : ai.generate}
-            disabled={ai.status === "loading"}
-            style={[
-              styles.aiBtn,
-              { borderColor: colors.muted, opacity: ai.status === "loading" ? 0.6 : 1 },
-              ai.tags.length > 0 && styles.aiBtnInline,
-            ]}>
-            {ai.status === "loading" ? (
+        <AISection
+          title="Story summary"
+          feature={ai.summary}
+          colors={colors}
+          isEmpty={(s) => s.trim().length === 0}
+          emptyHint="No summary yet — analyze the story so far."
+          noun="summary">
+          {(text) => <Text style={[styles.bodyText, { color: colors.text }]}>{text}</Text>}
+        </AISection>
+
+        {/* Whole-book analysis → knowledge base (power system + characters + lore) */}
+        <Section title="Story analysis" colors={colors}>
+          <Text style={[styles.placeholder, { color: colors.muted }]}>
+            Reads the entire book to extract a detailed power system and character profiles. Runs in
+            the background — you can keep reading — and is cached after the first run.
+          </Text>
+
+          {kbRunning ? (
+            <View style={styles.kbRow}>
               <ActivityIndicator size="small" color={colors.text} />
-            ) : (
+              <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600", flex: 1 }}>
+                {kb.progress
+                  ? `Analyzing… chunk ${kb.progress.current + 1}/${kb.progress.total}`
+                  : "Analyzing…"}
+              </Text>
+              <Pressable onPress={cancelAnalysis} hitSlop={8}>
+                <Text style={{ color: colors.muted, fontSize: 13, fontWeight: "600" }}>Cancel</Text>
+              </Pressable>
+            </View>
+          ) : kbPaused ? (
+            <Pressable
+              onPress={kb.resume}
+              style={[styles.aiBtn, styles.aiBtnInline, { borderColor: colors.muted }]}>
+              <Ionicons name="play" size={16} color={colors.text} />
+              <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                Resume analysis
+              </Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={kbHasData ? kb.reanalyze : kb.analyze}
+              style={[styles.aiBtn, styles.aiBtnInline, { borderColor: colors.muted }]}>
               <Ionicons name="sparkles-outline" size={16} color={colors.text} />
-            )}
-            <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
-              {ai.status === "loading"
-                ? "Analyzing…"
-                : ai.tags.length > 0
-                  ? "Re-generate tags"
-                  : "Generate tags with AI"}
-            </Text>
-          </Pressable>
+              <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                {kbHasData ? "Re-analyze full book" : "Analyze full book"}
+              </Text>
+            </Pressable>
+          )}
 
-          {ai.status === "error" && (
-            <Text style={[styles.aiError, { color: "#c0392b" }]}>{ai.error}</Text>
+          {(kb.status === "error" || (kbPaused && kb.error)) && (
+            <Text
+              style={[styles.aiError, { color: kb.status === "error" ? "#c0392b" : colors.muted }]}>
+              {kb.error}
+            </Text>
           )}
         </Section>
 
-        <Section title="Story summary" colors={colors}>
-          <Placeholder text="No summary yet — AI summary will appear here." colors={colors} />
-        </Section>
-
         <Section title="Power system" colors={colors}>
-          <Placeholder text="No power system extracted yet." colors={colors} />
+          {kb.kb.powerStages.length > 0 ? (
+            <View style={{ gap: 10 }}>
+              {kb.kb.powerStages.map((s) => (
+                <PowerStageRow key={s.id} stage={s} colors={colors} />
+              ))}
+            </View>
+          ) : (
+            <Text style={[styles.placeholder, { color: colors.muted }]}>
+              No power system extracted yet — run the analysis above.
+            </Text>
+          )}
         </Section>
 
-        <Section title="Character profiles" colors={colors}>
-          <Placeholder text="No characters extracted yet." colors={colors} />
+        <Section title={`Character profiles${kb.kb.characters.length ? ` (${kb.kb.characters.length})` : ""}`} colors={colors}>
+          {kb.kb.characters.length > 0 ? (
+            <View style={{ gap: 12 }}>
+              {kb.kb.characters.map((c) => (
+                <CharacterCard key={c.id} character={c} colors={colors} />
+              ))}
+            </View>
+          ) : (
+            <Text style={[styles.placeholder, { color: colors.muted }]}>
+              No characters extracted yet — run the analysis above.
+            </Text>
+          )}
         </Section>
 
         {/* Chapter index (real) */}
@@ -177,13 +236,15 @@ export default function BookDetailScreen() {
   );
 }
 
+type SectionColors = { text: string; muted: string };
+
 function Section({
   title,
   colors,
   children,
 }: {
   title: string;
-  colors: { text: string; muted: string };
+  colors: SectionColors;
   children: React.ReactNode;
 }) {
   return (
@@ -194,8 +255,118 @@ function Section({
   );
 }
 
-function Placeholder({ text, colors }: { text: string; colors: { muted: string } }) {
-  return <Text style={[styles.placeholder, { color: colors.muted }]}>{text}</Text>;
+/**
+ * A book-detail section backed by an AI feature: renders cached/loaded data,
+ * a Generate/Re-generate button (manual — protects Gemini quota), and errors.
+ * `noun` fills the button label ("Generate {noun} with AI").
+ */
+function AISection<T>({
+  title,
+  feature,
+  colors,
+  isEmpty,
+  emptyHint,
+  doneEmptyHint,
+  noun,
+  children,
+}: {
+  title: string;
+  feature: AIFeature<T>;
+  colors: SectionColors;
+  isEmpty: (data: T) => boolean;
+  emptyHint: string;
+  /** Shown when analysis finished but produced nothing (e.g. "no power system"). */
+  doneEmptyHint?: string;
+  noun: string;
+  children: (data: T) => React.ReactNode;
+}) {
+  const { data, status, error } = feature;
+  const loading = status === "loading";
+  const has = !isEmpty(data);
+
+  return (
+    <Section title={title} colors={colors}>
+      {has ? (
+        children(data)
+      ) : (
+        <Text style={[styles.placeholder, { color: colors.muted }]}>
+          {status === "done" ? (doneEmptyHint ?? emptyHint) : emptyHint}
+        </Text>
+      )}
+
+      <Pressable
+        onPress={has ? feature.regenerate : feature.generate}
+        disabled={loading}
+        style={[
+          styles.aiBtn,
+          styles.aiBtnInline,
+          { borderColor: colors.muted, opacity: loading ? 0.6 : 1 },
+        ]}>
+        {loading ? (
+          <ActivityIndicator size="small" color={colors.text} />
+        ) : (
+          <Ionicons name="sparkles-outline" size={16} color={colors.text} />
+        )}
+        <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+          {loading ? "Analyzing…" : has ? `Re-generate ${noun}` : `Generate ${noun} with AI`}
+        </Text>
+      </Pressable>
+
+      {status === "error" && <Text style={[styles.aiError, { color: "#c0392b" }]}>{error}</Text>}
+    </Section>
+  );
+}
+
+function PowerStageRow({ stage, colors }: { stage: PowerStage; colors: SectionColors }) {
+  return (
+    <View style={styles.psRow}>
+      <Text style={[styles.psName, { color: colors.text }]}>{stage.stageName}</Text>
+      {!!stage.description && (
+        <Text style={[styles.charLine, { color: colors.muted }]}>{stage.description}</Text>
+      )}
+    </View>
+  );
+}
+
+/** Labeled character profile (Name / Gender / Power / …) from the series KB. */
+function CharacterCard({ character, colors }: { character: Character; colors: SectionColors }) {
+  const c = character;
+  const rels = c.relationships.map((r) => `${r.name} (${r.relation})`).join(", ");
+  return (
+    <View style={[styles.charCard, { borderColor: colors.muted }]}>
+      <Text style={[styles.charName, { color: colors.text }]}>{c.name}</Text>
+      <Field label="Giới tính" value={c.gender} colors={colors} />
+      <Field label="Vai trò" value={c.role} colors={colors} />
+      <Field label="Sức mạnh" value={c.currentPower} colors={colors} />
+      <Field label="Thế lực" value={c.faction} colors={colors} />
+      <Field label="Biệt danh" value={c.aliases.join(", ")} colors={colors} />
+      <Field label="Kỹ năng" value={c.skills.join(", ")} colors={colors} />
+      <Field label="Quan hệ" value={rels} colors={colors} />
+      <Field label="Tính cách" value={c.personality} colors={colors} />
+      <Field label="Trạng thái" value={c.status} colors={colors} />
+      <Field label="Ngoại hình" value={c.appearance} colors={colors} />
+      <Field label="Lai lịch" value={c.backstory} colors={colors} />
+    </View>
+  );
+}
+
+/** A labeled `Label: value` line; renders nothing when the value is empty. */
+function Field({
+  label,
+  value,
+  colors,
+}: {
+  label: string;
+  value?: string;
+  colors: SectionColors;
+}) {
+  if (!value) return null;
+  return (
+    <Text style={[styles.charLine, { color: colors.text }]}>
+      <Text style={{ color: colors.muted, fontWeight: "600" }}>{label}: </Text>
+      {value}
+    </Text>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -227,6 +398,12 @@ const styles = StyleSheet.create({
   section: { marginTop: 28 },
   sectionTitle: { fontSize: 13, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 },
   placeholder: { fontSize: 14, fontStyle: "italic", lineHeight: 20 },
+  bodyText: { fontSize: 15, lineHeight: 23 },
+  charCard: { borderWidth: 1, borderRadius: 10, padding: 12, gap: 4 },
+  charName: { fontSize: 16, fontWeight: "700", marginBottom: 2 },
+  charLine: { fontSize: 13, lineHeight: 19 },
+  psRow: { gap: 2 },
+  psName: { fontSize: 15, fontWeight: "600" },
   tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   tag: { borderWidth: 1, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 5 },
   aiBtn: {
@@ -240,6 +417,7 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
   },
   aiBtnInline: { marginTop: 12 },
+  kbRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 12 },
   aiError: { fontSize: 13, marginTop: 8 },
   chapterRow: {
     flexDirection: "row",
