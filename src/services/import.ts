@@ -27,6 +27,7 @@ import { parseDocx } from "./docx";
 import { parseEpub } from "./epub";
 import { ParseError, type ParsedBook } from "./parseTypes";
 import { parsePdf } from "./pdf";
+import { cleanBoilerplate } from "../utils/clean";
 
 const ACCEPTED_MIME = [
   "application/epub+zip",
@@ -105,6 +106,9 @@ export async function importBook(): Promise<string | null> {
 
   const title = parsed.title?.trim() || baseName(asset.name) || "Untitled";
 
+  // Strip repeated headers/footers + ad lines injected by scraper sites.
+  const cleanedContent = cleanBoilerplate(parsed.chapters.map((c) => c.content));
+
   // Persist book.
   const bookId = saveBook({
     title,
@@ -122,7 +126,7 @@ export async function importBook(): Promise<string | null> {
   updateSeriesVolumeCount(seriesId, 1);
 
   // Index chapters for FTS5 search (diacritic-normalized inside indexChapter).
-  parsed.chapters.forEach((c, i) => indexChapter(bookId, i, c.content));
+  cleanedContent.forEach((content, i) => indexChapter(bookId, i, content));
 
   return bookId;
 }
