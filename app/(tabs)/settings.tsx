@@ -121,6 +121,27 @@ export default function SettingsScreen() {
           thổi nhẹ qua rặng tre.
         </Text>
 
+        {/* Read-aloud (TTS) */}
+        <Text style={[styles.label, { color: colors.muted }]}>Read-aloud</Text>
+        <Stepper
+          label="Speed"
+          value={`${s.ttsRate.toFixed(1)}×`}
+          onDec={() => s.setTtsRate(Math.round((s.ttsRate - 0.1) * 10) / 10)}
+          onInc={() => s.setTtsRate(Math.round((s.ttsRate + 0.1) * 10) / 10)}
+          colors={colors}
+        />
+        <Stepper
+          label="Pitch"
+          value={s.ttsPitch.toFixed(1)}
+          onDec={() => s.setTtsPitch(Math.round((s.ttsPitch - 0.1) * 10) / 10)}
+          onInc={() => s.setTtsPitch(Math.round((s.ttsPitch + 0.1) * 10) / 10)}
+          colors={colors}
+        />
+        <Text style={[styles.hint, { color: colors.muted }]}>
+          Vietnamese (vi-VN) voice. Install one via Android Settings → Accessibility → Text-to-speech
+          if read-aloud is silent.
+        </Text>
+
         {/* Data */}
         <Text style={[styles.label, { color: colors.muted }]}>Data</Text>
         <Pressable
