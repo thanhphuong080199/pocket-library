@@ -72,6 +72,26 @@ export class GeminiError extends Error {
   }
 }
 
+/**
+ * Every free model is in rate-limit cooldown right now. Distinct from a generic
+ * failure so long-running jobs (the KB pass) can *pause and resume* after the
+ * cooldown instead of aborting. Check `nextModelReadyInMs()` for when to retry.
+ */
+export class GeminiRateLimitError extends GeminiError {
+  constructor(cause?: unknown) {
+    super("All Gemini models are rate-limited.", cause);
+    this.name = "GeminiRateLimitError";
+  }
+}
+
+/** Options for a single call (used by the KB delta pass for large JSON output). */
+export interface RunOptions {
+  /** Force `application/json` response — bare, parseable JSON, no fences. */
+  json?: boolean;
+  /** Raise the output cap so big deltas don't truncate mid-JSON. */
+  maxOutputTokens?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Client (lazy singleton)
 // ---------------------------------------------------------------------------
@@ -139,30 +159,65 @@ function cooldownForStatus(status: number | undefined): number | null {
  * Run a prompt (system context prepended) against the first available model,
  * falling through MODELS on retryable failures. Models in cooldown are tried
  * last (only if every model is cooling down do we bother them again).
+ *
+ * Exported as the low-level runner so other services (e.g. the KB delta
+ * extractor) reuse the model-fallback + Vietnamese-context plumbing instead of
+ * spinning up a second client.
  */
-async function callGemini(prompt: string): Promise<string> {
+export async function runPrompt(prompt: string, opts?: RunOptions): Promise<string> {
   const now = Date.now();
   const ready = MODELS.filter((id) => (cooldownUntil.get(id) ?? 0) <= now);
   // Prefer ready models; keep cooling ones as a last resort rather than giving up.
   const order = ready.length > 0 ? ready : [...MODELS];
   const fullPrompt = `${SYSTEM_CONTEXT}\n\n${prompt}`;
 
+  const generationConfig =
+    opts?.json || opts?.maxOutputTokens
+      ? {
+          ...(opts.json ? { responseMimeType: "application/json" } : {}),
+          ...(opts.maxOutputTokens ? { maxOutputTokens: opts.maxOutputTokens } : {}),
+        }
+      : undefined;
+  const request = generationConfig
+    ? { contents: [{ role: "user", parts: [{ text: fullPrompt }] }], generationConfig }
+    : fullPrompt;
+
   let lastError: unknown;
+  let sawRateLimit = false;
   for (const id of order) {
     try {
-      const result = await getModel(id).generateContent(fullPrompt);
+      const result = await getModel(id).generateContent(request);
       cooldownUntil.delete(id); // recovered — clear any stale cooldown
       return result.response.text();
     } catch (e) {
       lastError = e;
-      const cooldown = cooldownForStatus(httpStatus(e));
+      const status = httpStatus(e);
+      const cooldown = cooldownForStatus(status);
       if (cooldown === null) {
         throw new GeminiError("Gemini request failed.", e); // non-retryable: bail
       }
+      if (status === 429) sawRateLimit = true;
       cooldownUntil.set(id, Date.now() + cooldown); // rate-limited/down: try next
     }
   }
-  throw new GeminiError("All Gemini models are rate-limited or unavailable.", lastError);
+  // Distinguish "everything is rate-limited" (pause + resume) from a transient
+  // server outage — either way we exhausted the models this round.
+  throw sawRateLimit
+    ? new GeminiRateLimitError(lastError)
+    : new GeminiError("All Gemini models are unavailable.", lastError);
+}
+
+/**
+ * Milliseconds until at least one model is out of cooldown (0 if one is ready
+ * now). Lets a paused job schedule its own resume after a rate-limit.
+ */
+export function nextModelReadyInMs(): number {
+  const now = Date.now();
+  let min = Infinity;
+  for (const id of MODELS) {
+    min = Math.min(min, Math.max(0, (cooldownUntil.get(id) ?? 0) - now));
+  }
+  return min === Infinity ? 0 : min;
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +273,7 @@ Text:
 ${textSample}
 `.trim();
 
-  const parsed = extractJson<unknown>(await callGemini(prompt));
+  const parsed = extractJson<unknown>(await runPrompt(prompt));
   if (!Array.isArray(parsed)) return [];
 
   const allowed = new Set<string>(ALLOWED_TAGS);
@@ -234,4 +289,43 @@ ${textSample}
     if (tags.length >= 4) break;
   }
   return tags;
+}
+
+/**
+ * Generate a short Vietnamese story summary from a text sample (opening premise,
+ * world/setting, tone). Plain text — no JSON. Returns a trimmed string; may be
+ * empty if the model gives nothing usable.
+ */
+export async function generateSummary(textSample: string): Promise<string> {
+  const prompt = `
+Read this story excerpt and write a concise Vietnamese summary of the book so far.
+Cover: the premise/main conflict, the setting/world-building, and the overall tone.
+Write 2-4 short paragraphs in Vietnamese. Do NOT spoil major twists or the ending.
+Return plain text only — no markdown, no headings, no JSON.
+
+Text:
+${textSample}
+`.trim();
+
+  return (await runPrompt(prompt)).trim();
+}
+
+// Deep power-system + character extraction moved to the unified KB engine
+// (`src/services/deltaExtractor.ts`), which reads the whole book (chunked) and
+// writes structured data into the series-scoped tables. See docs/PROGRESS.md
+// Phase 5. `runPrompt` + `extractJson` above are the shared primitives it uses.
+
+/**
+ * Explain a word/phrase in the context of a passage. Returns a short (≤3
+ * sentence) Vietnamese explanation as plain text.
+ */
+export async function explainWord(word: string, context: string): Promise<string> {
+  const prompt = `
+In the context of this story passage, briefly explain what "${word}" means.
+Answer in Vietnamese, under 3 sentences, simple language. Plain text only.
+
+Passage: "${context}"
+`.trim();
+
+  return (await runPrompt(prompt)).trim();
 }

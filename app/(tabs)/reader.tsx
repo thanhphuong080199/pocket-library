@@ -2,8 +2,10 @@ import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   LayoutChangeEvent,
+  Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
   Pressable,
@@ -15,7 +17,8 @@ import {
 import type { GestureResponderEvent } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { addBookmark, updateBookPosition } from "@/src/services/db";
+import { addBookmark, getAICache, setAICache, updateBookPosition } from "@/src/services/db";
+import * as gemini from "@/src/services/gemini";
 import * as music from "@/src/services/music";
 import * as tts from "@/src/services/tts";
 import { useAudioStore } from "@/src/store/audioStore";
@@ -57,6 +60,11 @@ export default function ReaderScreen() {
   const setChapter = useBookStore((s) => s.setChapter);
   const setPendingScrollY = useBookStore((s) => s.setPendingScrollY);
   const setPendingParagraph = useBookStore((s) => s.setPendingParagraph);
+
+  // Word-explainer ("define") mode: tap a word → AI explanation. Off by default
+  // so normal reading/TTS/long-press-bookmark gestures are unchanged.
+  const [defineMode, setDefineMode] = useState(false);
+  const [defineTarget, setDefineTarget] = useState<{ word: string; context: string } | null>(null);
 
   const scrollRef = useRef<ScrollView>(null);
   const scrollY = useRef(0);
@@ -307,6 +315,9 @@ export default function ReaderScreen() {
               />
             </Pressable>
           )}
+          <Pressable onPress={() => setDefineMode((v) => !v)} hitSlop={10}>
+            <Ionicons name="language" size={22} color={defineMode ? "#e67e22" : colors.text} />
+          </Pressable>
           <Pressable onPress={() => router.navigate("/chapters")} hitSlop={10}>
             <Ionicons name="list" size={24} color={colors.text} />
           </Pressable>
@@ -325,6 +336,11 @@ export default function ReaderScreen() {
         contentContainerStyle={styles.content}
         onScroll={onScroll}
         scrollEventThrottle={100}>
+        {defineMode && (
+          <Text style={[styles.defineHint, { color: "#e67e22" }]}>
+            Tap any word for an AI explanation.
+          </Text>
+        )}
         {paragraphs.map((p, i) => (
           <Pressable
             key={i}
@@ -332,10 +348,25 @@ export default function ReaderScreen() {
             delayLongPress={350}
             onLayout={(e) => onParaLayout(i, e.nativeEvent.layout.y)}
             style={i === ttsSegment ? { backgroundColor: highlightBg, borderRadius: 6 } : undefined}>
-            <Text style={paraStyle}>{p}</Text>
+            <ParagraphBody
+              text={p}
+              style={paraStyle}
+              defineMode={defineMode}
+              onWord={(word) => setDefineTarget({ word, context: p })}
+            />
           </Pressable>
         ))}
       </ScrollView>
+
+      {defineTarget && book && (
+        <WordExplainer
+          word={defineTarget.word}
+          context={defineTarget.context}
+          bookId={book.id}
+          colors={colors}
+          onClose={() => setDefineTarget(null)}
+        />
+      )}
 
       {ttsActive && (
         <TtsProgress
@@ -421,6 +452,124 @@ function TtsProgress({
   );
 }
 
+/**
+ * Renders a paragraph. In normal mode it's a plain `<Text>`. In define mode
+ * every word becomes a tappable nested `<Text>` (nested Text keeps the line
+ * flow intact) that reports the tapped word, with surrounding punctuation
+ * stripped, to `onWord`.
+ */
+function ParagraphBody({
+  text,
+  style,
+  defineMode,
+  onWord,
+}: {
+  text: string;
+  style: object;
+  defineMode: boolean;
+  onWord: (word: string) => void;
+}) {
+  if (!defineMode) return <Text style={style}>{text}</Text>;
+
+  // Split keeping whitespace tokens so spacing is preserved on re-join.
+  const tokens = text.split(/(\s+)/);
+  return (
+    <Text style={style}>
+      {tokens.map((tok, i) => {
+        if (!/[\p{L}\p{N}]/u.test(tok)) return tok; // whitespace / pure punctuation
+        const word = tok.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+        if (!word) return tok;
+        return (
+          <Text key={i} onPress={() => onWord(word)} style={styles.defineWord}>
+            {tok}
+          </Text>
+        );
+      })}
+    </Text>
+  );
+}
+
+/**
+ * Modal that explains a tapped word in context via Gemini. Cached per word
+ * (book-scoped) in `ai_cache` so re-tapping the same word costs no quota.
+ */
+function WordExplainer({
+  word,
+  context,
+  bookId,
+  colors,
+  onClose,
+}: {
+  word: string;
+  context: string;
+  bookId: string;
+  colors: { text: string; muted: string; background: string };
+  onClose: () => void;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setText(null);
+    setError(null);
+
+    if (!gemini.isGeminiConfigured()) {
+      setError("Gemini API key not set (EXPO_PUBLIC_GEMINI_KEY).");
+      return;
+    }
+
+    const cacheKey = `word_${word.toLowerCase()}`;
+    const cached = getAICache(bookId, cacheKey);
+    if (cached) {
+      setText(cached);
+      return;
+    }
+
+    (async () => {
+      try {
+        const result = await gemini.explainWord(word, context);
+        if (!alive) return;
+        setText(result);
+        if (result) setAICache(bookId, cacheKey, result);
+      } catch (e) {
+        if (alive) setError(e instanceof Error ? e.message : "Could not explain this word.");
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [word, context, bookId]);
+
+  return (
+    <Modal transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Pressable style={[styles.modalCard, { backgroundColor: colors.background, borderColor: colors.muted }]}>
+          <View style={styles.modalHeader}>
+            <Text style={[styles.modalWord, { color: colors.text }]} numberOfLines={1}>
+              {word}
+            </Text>
+            <Pressable onPress={onClose} hitSlop={10}>
+              <Ionicons name="close" size={22} color={colors.muted} />
+            </Pressable>
+          </View>
+          {error ? (
+            <Text style={[styles.modalBody, { color: "#c0392b" }]}>{error}</Text>
+          ) : text == null ? (
+            <View style={styles.modalLoading}>
+              <ActivityIndicator color={colors.text} />
+              <Text style={{ color: colors.muted }}>Explaining…</Text>
+            </View>
+          ) : (
+            <Text style={[styles.modalBody, { color: colors.text }]}>{text}</Text>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { alignItems: "center", justifyContent: "center", gap: 12, padding: 40 },
@@ -459,4 +608,18 @@ const styles = StyleSheet.create({
   progressTrack: { height: 4, borderRadius: 2, overflow: "hidden", opacity: 0.5 },
   progressFill: { height: 4, borderRadius: 2 },
   progressLabel: { fontSize: 12, fontWeight: "500", minWidth: 56, textAlign: "right" },
+  defineHint: { fontSize: 13, fontWeight: "600", marginBottom: 12 },
+  defineWord: { textDecorationLine: "underline", textDecorationStyle: "dotted" },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 28,
+  },
+  modalCard: { width: "100%", maxWidth: 420, borderWidth: 1, borderRadius: 14, padding: 18, gap: 12 },
+  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  modalWord: { flex: 1, fontSize: 20, fontWeight: "700" },
+  modalBody: { fontSize: 15, lineHeight: 22 },
+  modalLoading: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8 },
 });
