@@ -1,0 +1,60 @@
+name: Android Build (APK)
+
+# Builds a debug (self-signed) APK entirely on the free GitHub runner —
+# no EAS, no Expo account. Managed Expo project, so we prebuild the native
+# android/ project on the fly, then run Gradle directly.
+#
+# Download the APK from the run's "Artifacts" section and sideload it.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # lets you trigger a build manually from the Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prebuild native android project
+        run: npx expo prebuild --platform android --no-install
+        env:
+          # Bundled into the JS at build time (public by design). Optional:
+          # the app builds without it, only the AI features stay dormant.
+          EXPO_PUBLIC_GEMINI_KEY: ${{ secrets.EXPO_PUBLIC_GEMINI_KEY }}
+
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+        env:
+          EXPO_PUBLIC_GEMINI_KEY: ${{ secrets.EXPO_PUBLIC_GEMINI_KEY }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-library-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

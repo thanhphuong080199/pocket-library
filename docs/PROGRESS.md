@@ -8,8 +8,8 @@ Living tracker for the build. Update the status box + checklists as work lands. 
 
 ## Current status
 
-- **Phase:** 2 — Import + Reader → **feature-complete** (EPUB/DOCX/PDF import, reader, bookmarks, search). Only on-device boot verification remains.
-- **Last updated:** 2026-06-30
+- **Phase:** 3 — Audio → **TTS complete** (read-aloud wired into reader + settings). Remaining: background music (`music.ts`) blocked on MP3 assets; lock-screen/background config.
+- **Last updated:** 2026-07-01
 - **App boots in Expo Go:** not yet verified on-device; Metro bundle compiles. Library/Reader/Settings tabs + Search/Bookmarks screens wired.
 
 ### Key environment decisions (locked)
@@ -76,14 +76,22 @@ First on-device test (import + basics work). Reworked the reading experience:
 - ⚠️ All verified by tsc + lint + Android bundle; **needs on-device re-test** (esp. paragraph offset accuracy + jump precision).
 
 ### Phase 3 — Audio (Wk 3–4)
-- ⬜ `src/services/tts.ts` (expo-speech, vi-VN, ≤3000-char chunking, `isSpeakingAsync` fix, `ensureVietnameseTTS`)
-- ⬜ `src/services/music.ts` (expo-audio, loop, vol ~0.2, single instance)
-- ⬜ Source + bundle ~20–30 royalty-free MP3s in `assets/music/` ⏸️ (manual asset sourcing)
-- ⬜ AudioPlayer UI + lock-screen/background config
+- ✅ `src/services/tts.ts` (expo-speech, vi-VN hard-locked, ≤3000-char chunking chained via `onDone`, async `isSpeaking()` fix, `checkVietnameseTTS`/`ensureVietnameseTTS`, `getVietnameseVoices`). Owns a single playback session (module state) + mirrors lifecycle into `audioStore`. **Pause/resume simulated** (Android has no native `Speech.pause`): pause stops + keeps a chunk cursor, resume re-speaks from the current chunk (sentence-group boundary). `sessionId` guard ignores stale `onDone` after stop/pause/new-speak.
+- ✅ TTS is **segment (paragraph) based**: `speak(segments, startIndex, opts, callbacks)` takes the same paragraph array the reader renders and reports the active paragraph via `onSegment` (a paragraph over 3000 chars is sub-chunked but reported under one index). Store tracks `ttsSegment`/`ttsTotalSegments`.
+- ✅ Reader read-aloud wired (`app/(tabs)/reader.tsx`): play/pause + stop in top bar, reads current chapter, **auto-advances to next chapter** on finish (via `speakChapterRef`), stops on tab blur/unmount and on manual chapter nav. Uses persisted `ttsRate`/`ttsPitch`/`ttsVoice`. `ensureVietnameseTTS()` fires once when starting.
+- ✅ **Read-along UX:** the paragraph being read is highlighted + auto-scrolled into view; a **seekable progress bar** (`TtsProgress`, by paragraph) sits above the nav — tap/drag to jump TTS to any paragraph (previews while dragging, commits on release). No new deps (custom touch-responder bar).
+- ✅ Settings "Read-aloud" section — Speed + Pitch steppers (persisted `ttsRate`/`ttsPitch`) + vi-VN install hint.
+- ✅ **Boilerplate/ad stripping** at import (`src/utils/clean.ts` → wired in `import.ts`): (1) cross-chapter repeated short lines = headers/footers → removed (needs ≥4 chapters, ≥60% frequency); (2) per-line ad phrases (truyenfull, "đọc truyện tại", telegram/fb, "nguồn:", …) drop the line; URLs are stripped in place so prose ending in a link survives. Conservative to avoid nuking content; cleans FTS-indexed text once at import (re-import to clean existing books). Unit-tested standalone on VN web-novel sample.
+- ✅ `src/services/music.ts` (expo-audio, single looping `AudioPlayer`, vol ~0.2). `playForTags(tags)` picks a bundled loop via MUSIC_MAP→MUSIC_SOURCES (random among candidates; neutral default when tags don't map); `pause/resume/stopMusic`, `setMusicVolume`, `isMusicAvailable()`. Audio mode = `mixWithOthers` + `playsInSilentMode` so it sits under TTS. All entry points guarded (audio failures warn, never crash).
+- ✅ Source + bundle **22** royalty-free MP3s in `assets/music/` — compressed with ffmpeg (≤90s, mono, 96kbps, metadata stripped): **95M→21M total**. MUSIC_SOURCES wired (literal `require()` per file).
+- ✅ Music toggle in reader top bar (`app/(tabs)/reader.tsx`) — musical-notes icon, plays a loop from the current book's tags, stops on screen blur/unmount. Shown only when `isMusicAvailable()`.
+- ⬜ Standalone AudioPlayer UI (volume slider / track label) + lock-screen/background config (foreground service; deferred from Phase 0).
+- ⚠️ TTS verified by tsc + lint only; **needs on-device test** (needs a device vi-VN voice; pause/resume restart-chunk behavior; chapter auto-advance).
 
 ### Phase 4 — Gemini text features (Wk 5–6)
-- ⬜ `src/services/gemini.ts` (SYSTEM_CONTEXT vi, tags, summary, characters, explainWord, power system; strip ```json fences; cache-first)
-- ⬜ `src/hooks/useBookAI.ts` (tags → music + cache flow)
+- 🟡 `src/services/gemini.ts` — client + **auto-tagging** done. SYSTEM_CONTEXT (vi), `extractJson` (strips ```json fences + slices first {}/[] block), `isGeminiConfigured()` (soft-fails when key absent/placeholder), `generateTags()` (closed `ALLOWED_TAGS` vocab = MUSIC_MAP keys, validated/deduped/≤4). **Model: `gemini-3.5-flash`** (⚠️ spec's `gemini-1.5-flash` was SHUT DOWN in 2026 → 404; Pro models now paid-only, Flash stays free ~15 RPM/1500 RPD). **Multi-model fallback:** `MODELS` = [3.5-flash, 2.5-flash, 3.1-flash-lite]; on 429/5xx/network it falls through to the next (per-model free quota buckets) with per-model cooldowns; non-retryable (400/401/403) surfaces immediately. Remaining: summary, characters, explainWord, power system.
+- 🟡 `src/hooks/useBookAI.ts` — **tags** cache-first flow done (`buildTagSample`: head+mid chapters ≤6000 chars; `generate`/`regenerate`; writes `ai_cache` + `books.tags` + bookStore). Music wiring deferred (music.ts not written yet — user sequenced auto-tag before music). Summary/characters TODO.
+- ✅ Auto-tag UI wired into **book detail page** (`app/book/[id].tsx`): Tags section shows AI tags + "Generate/Re-generate tags with AI" button (spinner while loading, error line on failure). Manual trigger (not auto-on-open) to protect quota. Missing key falls through the normal error path (no dedicated hint — key is expected present).
 - ⬜ AIPanel UI (summary, character cards)
 - ⬜ Long-press word → explainer popup
 
@@ -100,12 +108,17 @@ First on-device test (import + basics work). Reworked the reading experience:
 ---
 
 ## Open questions / gotchas (carry forward)
-- `Speech.isSpeakingAsync()` is async — spec's sync cast is wrong; fix in `tts.ts`.
-- FTS5 must be populated per-chapter on import (not auto).
-- MP3 assets need manual sourcing before `music.ts` is testable; `require()` per file.
-- Background TTS on Android needs foreground service + lock-screen controls; verify `expo-speech` keeps playing backgrounded.
-- expo-file-system v19: use new API; fall back to `/legacy` import for raw-string reads if needed.
-- Gemini key required in `.env` (`EXPO_PUBLIC_GEMINI_KEY`) before any AI feature works.
+
+### Live (unresolved)
+- ~~**MP3 assets** need manual sourcing before `music.ts` is testable.~~ ✅ 22 loops bundled + compressed; MUSIC_SOURCES wired; `music.ts` + reader toggle done. Music **auto-plays from a book's tags**, so it pairs with Phase 4 auto-tagging. Not yet verified on-device (needs the CI/dev build).
+- **Background TTS on Android** needs a foreground service + lock-screen controls; verify `expo-speech` keeps playing backgrounded. Nothing configured in `app.json` yet — belongs with the AudioPlayer work.
+- **Gemini key** required in `.env` (`EXPO_PUBLIC_GEMINI_KEY`) before any AI feature works. Standing Phase 4 prerequisite — `.env.example` + `env.d.ts` typing exist; real `.env` must be added by the user. App soft-fails without it (`isGeminiConfigured()` → false, AI UI shows an "add key" hint).
+- **Gemini model IDs drift** — verified July 2026: `gemini-1.5-flash`/1.0 are **shut down (404)**, Pro models are **paid-only**. Use free Flash: default `gemini-3.5-flash` with fallback to `gemini-2.5-flash`, `gemini-3.1-flash-lite` (`MODELS` in `gemini.ts`). Re-verify before assuming any pinned model still exists.
+
+### Resolved
+- ~~`Speech.isSpeakingAsync()` is async — spec's sync cast is wrong; fix in `tts.ts`.~~ ✅ Fixed — `tts.ts` `isSpeaking()` returns the promise directly (no cast).
+- ~~FTS5 must be populated per-chapter on import (not auto).~~ ✅ Done — `import.ts` calls `indexChapter` per chapter → `INSERT INTO book_content_fts` (`db.ts`).
+- ~~expo-file-system v19: use new API; fall back to `/legacy` import for raw-string reads if needed.~~ ✅ Settled — all parsers use the new `File`/`Directory`/`Paths` API; `/legacy` fallback never needed.
 
 ## How to run
 ```bash

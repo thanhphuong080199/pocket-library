@@ -2,9 +2,10 @@ import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useMemo } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { useBookAI } from "@/src/hooks/useBookAI";
 import { getBook, getChapters } from "@/src/services/db";
 import { useBookStore } from "@/src/store/bookStore";
 import { THEMES, useSettingsStore } from "@/src/store/settingsStore";
@@ -19,13 +20,15 @@ export default function BookDetailScreen() {
   const jumpTo = useBookStore((s) => s.jumpTo);
 
   const book = useMemo(() => (id ? getBook(id) : null), [id]);
+  const chapters = useMemo(() => (book ? getChapters(book.id) : []), [book]);
+  const ai = useBookAI(book, chapters);
 
   // Load this book into the reader context so Read / Search / Bookmarks work.
   useEffect(() => {
     if (!book) return;
     setCurrentBook(book);
-    setChapters(getChapters(book.id));
-  }, [book, setCurrentBook, setChapters]);
+    setChapters(chapters);
+  }, [book, chapters, setCurrentBook, setChapters]);
 
   if (!book) {
     return (
@@ -101,18 +104,42 @@ export default function BookDetailScreen() {
           </Pressable>
         </View>
 
-        {/* Tags (placeholder until AI) */}
+        {/* Tags (AI auto-tagging) */}
         <Section title="Tags" colors={colors}>
-          {book.tags.length ? (
+          {ai.tags.length > 0 && (
             <View style={styles.tagRow}>
-              {book.tags.map((t) => (
+              {ai.tags.map((t) => (
                 <View key={t} style={[styles.tag, { borderColor: colors.muted }]}>
                   <Text style={{ color: colors.text, fontSize: 13 }}>{t}</Text>
                 </View>
               ))}
             </View>
-          ) : (
-            <Placeholder text="No tags yet — AI tagging arrives in a later phase." colors={colors} />
+          )}
+
+          <Pressable
+            onPress={ai.tags.length > 0 ? ai.regenerate : ai.generate}
+            disabled={ai.status === "loading"}
+            style={[
+              styles.aiBtn,
+              { borderColor: colors.muted, opacity: ai.status === "loading" ? 0.6 : 1 },
+              ai.tags.length > 0 && styles.aiBtnInline,
+            ]}>
+            {ai.status === "loading" ? (
+              <ActivityIndicator size="small" color={colors.text} />
+            ) : (
+              <Ionicons name="sparkles-outline" size={16} color={colors.text} />
+            )}
+            <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+              {ai.status === "loading"
+                ? "Analyzing…"
+                : ai.tags.length > 0
+                  ? "Re-generate tags"
+                  : "Generate tags with AI"}
+            </Text>
+          </Pressable>
+
+          {ai.status === "error" && (
+            <Text style={[styles.aiError, { color: "#c0392b" }]}>{ai.error}</Text>
           )}
         </Section>
 
@@ -202,6 +229,18 @@ const styles = StyleSheet.create({
   placeholder: { fontSize: 14, fontStyle: "italic", lineHeight: 20 },
   tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   tag: { borderWidth: 1, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 5 },
+  aiBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  aiBtnInline: { marginTop: 12 },
+  aiError: { fontSize: 13, marginTop: 8 },
   chapterRow: {
     flexDirection: "row",
     alignItems: "center",
