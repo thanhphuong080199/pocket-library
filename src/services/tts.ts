@@ -1,31 +1,35 @@
 /**
- * Text-to-Speech via expo-speech (Android built-in engine).
+ * Text-to-Speech, backed by the custom native `pocket-tts` foreground service.
  *
- * Language is hard-locked to vi-VN — never auto-detect (Gemini/Android will
- * mis-guess Hán-Việt content as Chinese; see docs/SPEC.md).
+ * Language is hard-locked to vi-VN by the native engine — never auto-detect
+ * (Gemini/Android will mis-guess Hán-Việt content as Chinese; see docs/SPEC.md).
  *
  * Playback is **segment-based**: the caller passes the same paragraph array the
- * reader renders, and we speak them in order, reporting the active segment
- * index via `onSegment`. That lets the UI highlight the paragraph being read,
- * auto-scroll to it, and drive a seekable progress bar. A paragraph longer than
- * the Android `speak` length limit is internally sub-chunked on sentence
- * boundaries but still reported under its single segment index.
+ * reader renders; this module sanitizes + sub-chunks each paragraph on sentence
+ * boundaries (for natural prosody) and hands the flat chunk list to the native
+ * service, which speaks + chains them **natively** inside a media foreground
+ * service. That's what lets read-aloud keep going when the app is backgrounded or
+ * the screen is locked, with lock-screen transport controls — the JS thread is no
+ * longer in the per-utterance loop.
  *
- * Pause/resume: `Speech.pause()`/`Speech.resume()` are NOT available on Android,
- * so we simulate pause by stopping and remembering the queue cursor, then
- * re-speaking from the current chunk on resume (a sentence-group boundary).
- *
- * This module owns a single playback session (module-level state) and mirrors
+ * The public API is unchanged from the old expo-speech implementation so the
+ * reader / playback session don't care which engine is underneath. Pause is real
+ * on the native side (stop + resume-from-cursor); the module still mirrors
  * lifecycle into `audioStore` so any UI can render controls.
  */
-import * as Speech from "expo-speech";
 import { Alert } from "react-native";
 
+import * as PocketTts from "@/modules/pocket-tts";
 import { useAudioStore } from "@/src/store/audioStore";
-import { splitIntoChunks } from "@/src/utils/text";
+import { sanitizeForSpeech, splitIntoChunks } from "@/src/utils/text";
 
-const LANGUAGE = "vi-VN";
-const MAX_CHUNK = 3000;
+/**
+ * Target utterance size. Deliberately small (≈ 1–3 sentences): the engine resets
+ * sentence intonation per utterance and inserts a natural pause between them, so
+ * sentence-sized pieces sound far less monotone than one long run-on utterance.
+ * `splitIntoChunks` never cuts mid-sentence, so a longer sentence still goes whole.
+ */
+const MAX_CHUNK = 280;
 
 export interface TTSOptions {
   rate?: number; // 0.1 – 2.0, default 1.0
@@ -41,25 +45,78 @@ export interface SpeakCallbacks {
   onError?: (error: unknown) => void;
 }
 
-/** One speakable unit: a sub-chunk of text tagged with its source segment. */
-interface QueueItem {
-  text: string;
-  segment: number;
+export interface Voice {
+  identifier: string;
+  name: string;
+  language: string;
+}
+
+/** Handlers the playback session registers so lock-screen next/prev can change chapter. */
+export interface RemoteChapterHandler {
+  next: () => void;
+  prev: () => void;
 }
 
 // --- Single playback session -------------------------------------------------
 
-let queue: QueueItem[] = [];
-let cursor = 0;
-let reportedSegment = -1;
-let sessionOptions: TTSOptions = {};
 let sessionCallbacks: SpeakCallbacks = {};
-/** Bumped on every stop/new-speak so stale onDone callbacks are ignored. */
-let sessionId = 0;
+let remoteChapter: RemoteChapterHandler | null = null;
+
+/** Register lock-screen chapter navigation (called once by the playback session). */
+export function setRemoteChapterHandler(handler: RemoteChapterHandler): void {
+  remoteChapter = handler;
+}
+
+// Wire native events to the store + the active session's callbacks. Set up once.
+PocketTts.onSegment((index) => {
+  useAudioStore.getState().setTtsSegment(index);
+  sessionCallbacks.onSegment?.(index);
+});
+
+PocketTts.onDone(() => {
+  const done = sessionCallbacks.onDone;
+  setIdle();
+  done?.();
+});
+
+PocketTts.onError((message) => {
+  const onError = sessionCallbacks.onError;
+  setIdle();
+  onError?.(new Error(message));
+});
+
+PocketTts.onRemoteCommand((command) => {
+  const audio = useAudioStore.getState();
+  switch (command) {
+    case "play":
+      audio.setPaused(false);
+      audio.setSpeaking(true);
+      break;
+    case "pause":
+      audio.setPaused(true);
+      break;
+    case "stop":
+      setIdle();
+      break;
+    case "next":
+      remoteChapter?.next();
+      break;
+    case "prev":
+      remoteChapter?.prev();
+      break;
+  }
+});
+
+function setIdle(): void {
+  const audio = useAudioStore.getState();
+  audio.setSpeaking(false);
+  audio.setPaused(false);
+  audio.setTtsSegment(-1);
+}
 
 /**
  * Begin reading `segments` aloud starting at `startIndex`. Any in-flight speech
- * is stopped. `segments` should be the paragraph array the reader renders so
+ * is replaced. `segments` should be the paragraph array the reader renders so
  * reported indices line up with what's on screen.
  */
 export function speak(
@@ -68,23 +125,25 @@ export function speak(
   options: TTSOptions = {},
   callbacks: SpeakCallbacks = {},
 ): void {
-  stop();
-
-  queue = [];
-  for (let i = Math.max(0, startIndex); i < segments.length; i++) {
-    for (const part of splitIntoChunks(segments[i] ?? "", MAX_CHUNK)) {
-      if (part.trim()) queue.push({ text: part, segment: i });
+  // Flatten paragraphs → sentence-sized chunks, tracking each chunk's paragraph.
+  const chunks: string[] = [];
+  const segmentIndices: number[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const spoken = sanitizeForSpeech(segments[i] ?? "");
+    for (const part of splitIntoChunks(spoken, MAX_CHUNK)) {
+      if (part.trim()) {
+        chunks.push(part);
+        segmentIndices.push(i);
+      }
     }
   }
-  cursor = 0;
-  reportedSegment = -1;
-  sessionOptions = options;
-  sessionCallbacks = callbacks;
 
+  sessionCallbacks = callbacks;
   const audio = useAudioStore.getState();
   audio.setTtsTotalSegments(segments.length);
 
-  if (queue.length === 0) {
+  if (chunks.length === 0) {
+    setIdle();
     callbacks.onDone?.();
     return;
   }
@@ -92,125 +151,68 @@ export function speak(
   audio.setSpeaking(true);
   audio.setPaused(false);
 
-  speakFromCursor();
+  // Push now-playing metadata (set by the playback session) to the lock screen.
+  PocketTts.setNowPlaying(audio.bookTitle, audio.chapterTitle);
+  PocketTts.speak(
+    chunks,
+    segmentIndices,
+    Math.max(0, startIndex),
+    options.rate ?? 1.0,
+    options.pitch ?? 1.0,
+    options.voice ?? null,
+  );
 }
 
-function speakFromCursor(): void {
-  const mySession = sessionId;
-  const item = queue[cursor];
-  if (item === undefined) return;
-
-  if (item.segment !== reportedSegment) {
-    reportedSegment = item.segment;
-    useAudioStore.getState().setTtsSegment(item.segment);
-    sessionCallbacks.onSegment?.(item.segment);
-  }
-
-  Speech.speak(item.text, {
-    language: LANGUAGE,
-    rate: sessionOptions.rate ?? 1.0,
-    pitch: sessionOptions.pitch ?? 1.0,
-    voice: sessionOptions.voice,
-    onDone: () => {
-      // Ignore if this session was superseded (stop/pause/new speak).
-      if (mySession !== sessionId) return;
-      cursor += 1;
-      if (cursor < queue.length) {
-        speakFromCursor();
-      } else {
-        finishSession();
-      }
-    },
-    onError: (error) => {
-      if (mySession !== sessionId) return;
-      console.error("TTS error:", error);
-      sessionCallbacks.onError?.(error);
-      finishSession();
-    },
-  });
-}
-
-function finishSession(): void {
-  const done = sessionCallbacks.onDone;
-  resetState();
-  const audio = useAudioStore.getState();
-  audio.setSpeaking(false);
-  audio.setPaused(false);
-  audio.setTtsSegment(-1);
-  done?.();
-}
-
-function resetState(): void {
-  sessionId++;
-  queue = [];
-  cursor = 0;
-  reportedSegment = -1;
-  sessionOptions = {};
-  sessionCallbacks = {};
-}
-
-/**
- * Pause playback. Because Android has no native pause, this stops speech and
- * keeps the cursor so `resume()` can re-speak from the current chunk.
- */
+/** Pause playback (native stops + remembers the cursor; `resume` re-speaks from it). */
 export function pause(): void {
-  if (queue.length === 0) return;
   const audio = useAudioStore.getState();
   if (!audio.isSpeaking || audio.isPaused) return;
-
-  sessionId++; // invalidate the in-flight chunk's onDone
-  Speech.stop();
+  PocketTts.pause();
   audio.setPaused(true);
 }
 
-/** Resume after `pause()`, re-speaking from the start of the current chunk. */
+/** Resume after `pause()`. */
 export function resume(): void {
   const audio = useAudioStore.getState();
-  if (!audio.isPaused || queue.length === 0) return;
-
+  if (!audio.isPaused) return;
+  PocketTts.resume();
   audio.setPaused(false);
   audio.setSpeaking(true);
-  speakFromCursor();
 }
 
 /** Stop playback entirely and clear the session. */
 export function stop(): void {
-  const hadSession = queue.length > 0;
-  Speech.stop();
-  resetState();
-  if (hadSession) {
-    const audio = useAudioStore.getState();
-    audio.setSpeaking(false);
-    audio.setPaused(false);
-    audio.setTtsSegment(-1);
-  }
+  sessionCallbacks = {};
+  PocketTts.stop();
+  setIdle();
 }
 
-/** True while the engine is actively producing speech. */
+/** True while the engine is actively producing speech (not paused/idle). */
 export async function isSpeaking(): Promise<boolean> {
-  return Speech.isSpeakingAsync();
+  const audio = useAudioStore.getState();
+  return audio.isSpeaking && !audio.isPaused;
 }
 
 // --- Voice availability ------------------------------------------------------
 
-export async function getAvailableVoices(): Promise<Speech.Voice[]> {
-  return Speech.getAvailableVoicesAsync();
+export async function getAvailableVoices(): Promise<Voice[]> {
+  return PocketTts.getVoices();
 }
 
 /** Only the vi-VN voices the device has installed. */
-export async function getVietnameseVoices(): Promise<Speech.Voice[]> {
+export async function getVietnameseVoices(): Promise<Voice[]> {
   const voices = await getAvailableVoices();
   return voices.filter((v) => v.language?.startsWith("vi"));
 }
 
 export async function checkVietnameseTTS(): Promise<boolean> {
-  const voices = await getAvailableVoices();
-  return voices.some((v) => v.language?.startsWith("vi"));
+  const voices = await getVietnameseVoices();
+  return voices.length > 0;
 }
 
 /**
- * Call on first launch — if no Vietnamese voice is installed, guide the user to
- * download one (Android bundles no vi-VN voice by default on many devices).
+ * Call when starting read-aloud — if no Vietnamese voice is installed, guide the
+ * user to download one (Android bundles no vi-VN voice by default on many devices).
  */
 export async function ensureVietnameseTTS(): Promise<void> {
   const available = await checkVietnameseTTS();

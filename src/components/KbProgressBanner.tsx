@@ -6,7 +6,7 @@
  */
 import { Ionicons } from "@expo/vector-icons";
 import { useEffect } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { cancelAnalysis, dismissJob, resumeSeries } from "@/src/services/kbRunner";
 import { useKBStore } from "@/src/store/kbStore";
@@ -17,6 +17,8 @@ export function KbProgressBanner() {
   const job = useKBStore((s) => s.job);
   const status = useKBStore((s) => s.status);
   const error = useKBStore((s) => s.error);
+  const minimized = useKBStore((s) => s.minimized);
+  const setMinimized = (v: boolean) => useKBStore.getState().patch({ minimized: v });
 
   // Auto-hide the "done" banner after a moment.
   useEffect(() => {
@@ -30,29 +32,44 @@ export function KbProgressBanner() {
   const frac = job.total > 0 ? Math.min(1, job.current / job.total) : 0;
   const running = status === "running";
   const done = status === "done";
+  const pct = Math.round(frac * 100);
 
   const headline = running
     ? `Analyzing “${job.title}”`
     : done
       ? "Knowledge base ready"
-      : status === "error"
-        ? "Analysis paused"
-        : "Analysis paused";
+      : "Analysis paused";
+
+  const statusIcon = done ? "checkmark-circle" : running ? "sparkles" : "pause-circle";
+
+  // Collapsed: a small pill (icon + progress) that just gets out of the way.
+  if (minimized) {
+    return (
+      <Pressable
+        onPress={() => setMinimized(false)}
+        style={[styles.pill, { backgroundColor: colors.background, borderColor: colors.muted }]}>
+        <Ionicons name={statusIcon} size={16} color={colors.text} />
+        <Text style={[styles.pillText, { color: colors.text }]}>
+          {done ? "Done" : `${pct}%`}
+        </Text>
+        {running && <ActivityIndicator size="small" color={colors.muted} />}
+      </Pressable>
+    );
+  }
 
   return (
     <View style={[styles.wrap, { backgroundColor: colors.background, borderColor: colors.muted }]}>
       <View style={styles.headerRow}>
-        <Ionicons
-          name={done ? "checkmark-circle" : running ? "sparkles" : "pause-circle"}
-          size={18}
-          color={colors.text}
-        />
+        <Ionicons name={statusIcon} size={18} color={colors.text} />
         <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
           {headline}
         </Text>
         <Text style={[styles.count, { color: colors.muted }]}>
           {job.current}/{job.total}
         </Text>
+        <Pressable onPress={() => setMinimized(true)} hitSlop={8}>
+          <Ionicons name="chevron-down" size={18} color={colors.muted} />
+        </Pressable>
       </View>
 
       <View style={[styles.track, { backgroundColor: colors.muted }]}>
@@ -114,6 +131,24 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 6,
   },
+  pill: {
+    position: "absolute",
+    right: 12,
+    bottom: 70,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 6,
+  },
+  pillText: { fontSize: 13, fontWeight: "700" },
   headerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   title: { flex: 1, fontSize: 14, fontWeight: "700" },
   count: { fontSize: 12, fontWeight: "600" },

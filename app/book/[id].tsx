@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -135,7 +135,9 @@ export default function BookDetailScreen() {
           colors={colors}
           isEmpty={(s) => s.trim().length === 0}
           emptyHint="No summary yet — analyze the story so far."
-          noun="summary">
+          noun="summary"
+          collapsible
+          initialCollapsed>
           {(text) => <Text style={[styles.bodyText, { color: colors.text }]}>{text}</Text>}
         </AISection>
 
@@ -186,7 +188,7 @@ export default function BookDetailScreen() {
           )}
         </Section>
 
-        <Section title="Power system" colors={colors}>
+        <Section title="Power system" colors={colors} collapsible initialCollapsed>
           {kb.kb.powerStages.length > 0 ? (
             <View style={{ gap: 10 }}>
               {kb.kb.powerStages.map((s) => (
@@ -200,7 +202,11 @@ export default function BookDetailScreen() {
           )}
         </Section>
 
-        <Section title={`Character profiles${kb.kb.characters.length ? ` (${kb.kb.characters.length})` : ""}`} colors={colors}>
+        <Section
+          title={`Character profiles${kb.kb.characters.length ? ` (${kb.kb.characters.length})` : ""}`}
+          colors={colors}
+          collapsible
+          initialCollapsed>
           {kb.kb.characters.length > 0 ? (
             <View style={{ gap: 12 }}>
               {kb.kb.characters.map((c) => (
@@ -215,7 +221,7 @@ export default function BookDetailScreen() {
         </Section>
 
         {/* Chapter index (real) */}
-        <Section title={`Chapters (${titles.length})`} colors={colors}>
+        <Section title={`Chapters (${titles.length})`} colors={colors} collapsible initialCollapsed>
           {titles.map((t, i) => (
             <Pressable
               key={i}
@@ -242,15 +248,34 @@ function Section({
   title,
   colors,
   children,
+  collapsible = false,
+  initialCollapsed = false,
 }: {
   title: string;
   colors: SectionColors;
   children: React.ReactNode;
+  /** Show a tappable header with a chevron that hides the body. */
+  collapsible?: boolean;
+  initialCollapsed?: boolean;
 }) {
+  const [collapsed, setCollapsed] = useState(initialCollapsed);
+
+  if (!collapsible) {
+    return (
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: colors.text }]}>{title}</Text>
+        {children}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.section}>
-      <Text style={[styles.sectionTitle, { color: colors.text }]}>{title}</Text>
-      {children}
+      <Pressable style={styles.sectionHeader} onPress={() => setCollapsed((c) => !c)} hitSlop={6}>
+        <Text style={[styles.sectionTitle, { color: colors.text, marginBottom: 0 }]}>{title}</Text>
+        <Ionicons name={collapsed ? "chevron-down" : "chevron-up"} size={18} color={colors.muted} />
+      </Pressable>
+      {!collapsed && <View style={{ marginTop: 12 }}>{children}</View>}
     </View>
   );
 }
@@ -268,6 +293,8 @@ function AISection<T>({
   emptyHint,
   doneEmptyHint,
   noun,
+  collapsible = false,
+  initialCollapsed = false,
   children,
 }: {
   title: string;
@@ -278,6 +305,8 @@ function AISection<T>({
   /** Shown when analysis finished but produced nothing (e.g. "no power system"). */
   doneEmptyHint?: string;
   noun: string;
+  collapsible?: boolean;
+  initialCollapsed?: boolean;
   children: (data: T) => React.ReactNode;
 }) {
   const { data, status, error } = feature;
@@ -285,7 +314,7 @@ function AISection<T>({
   const has = !isEmpty(data);
 
   return (
-    <Section title={title} colors={colors}>
+    <Section title={title} colors={colors} collapsible={collapsible} initialCollapsed={initialCollapsed}>
       {has ? (
         children(data)
       ) : (
@@ -396,6 +425,7 @@ const styles = StyleSheet.create({
   primaryText: { fontSize: 16, fontWeight: "700" },
   iconBtn: { borderWidth: 1, borderRadius: 22, padding: 11 },
   section: { marginTop: 28 },
+  sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   sectionTitle: { fontSize: 13, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 },
   placeholder: { fontSize: 14, fontStyle: "italic", lineHeight: 20 },
   bodyText: { fontSize: 15, lineHeight: 23 },

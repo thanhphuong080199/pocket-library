@@ -33,7 +33,7 @@ import {
   type CharacterEventType,
   type Relationship,
 } from "./db";
-import { extractJson, GeminiRateLimitError, runPrompt } from "./gemini";
+import { extractJson, GeminiAbortError, GeminiRateLimitError, runPrompt } from "./gemini";
 
 /**
  * Target chunk size. Deliberately large: the dominant cost is ~one Gemini
@@ -215,10 +215,12 @@ async function extractDelta(
   existingKB: KBSnapshot,
   chunkText: string,
   volumeNumber: number,
+  signal?: AbortSignal,
 ): Promise<Delta> {
   const raw = await runPrompt(buildPrompt(existingKB, chunkText, volumeNumber), {
     json: true,
     maxOutputTokens: DELTA_MAX_OUTPUT_TOKENS,
+    signal,
   });
   const parsed = extractJson<Partial<Delta>>(raw);
   return {
@@ -395,8 +397,9 @@ export async function extractAndMergeChunk(
   snapshot: KBSnapshot,
   chunk: BookChunk,
   volumeNumber: number,
+  signal?: AbortSignal,
 ): Promise<void> {
-  await processText(seriesId, snapshot, chunk.text, chunk.startChapter, volumeNumber, 0);
+  await processText(seriesId, snapshot, chunk.text, chunk.startChapter, volumeNumber, 0, signal);
 }
 
 async function processText(
@@ -406,21 +409,24 @@ async function processText(
   startChapter: number,
   volumeNumber: number,
   depth: number,
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
-    const delta = await extractDelta(snapshot, text, volumeNumber);
+    const delta = await extractDelta(snapshot, text, volumeNumber, signal);
     if (delta.hasChanges) mergeDelta(seriesId, delta, snapshot, volumeNumber, startChapter);
   } catch (e) {
-    // Let the runner handle rate-limits (pause + resume); only split on other
-    // failures (parse errors from truncated/garbled JSON).
-    if (e instanceof GeminiRateLimitError) throw e;
+    // Let the runner handle rate-limits (pause + resume) and user cancels; only
+    // split on other failures (parse errors from truncated/garbled JSON).
+    if (e instanceof GeminiRateLimitError || e instanceof GeminiAbortError || signal?.aborted) {
+      throw e;
+    }
     if (depth >= MAX_SPLIT_DEPTH || text.length <= MIN_SPLIT_CHARS) {
       console.warn(`KB: skipping a fragment after parse failure (${text.length} chars):`, e);
       return;
     }
     const cut = splitPoint(text);
-    await processText(seriesId, snapshot, text.slice(0, cut), startChapter, volumeNumber, depth + 1);
-    await processText(seriesId, snapshot, text.slice(cut), startChapter, volumeNumber, depth + 1);
+    await processText(seriesId, snapshot, text.slice(0, cut), startChapter, volumeNumber, depth + 1, signal);
+    await processText(seriesId, snapshot, text.slice(cut), startChapter, volumeNumber, depth + 1, signal);
   }
 }
 
