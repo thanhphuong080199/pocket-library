@@ -20,17 +20,53 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { addBookmark, getAICache, setAICache, updateBookPosition } from "@/src/services/db";
 import * as gemini from "@/src/services/gemini";
 import * as music from "@/src/services/music";
+import * as playback from "@/src/services/playbackSession";
 import * as tts from "@/src/services/tts";
 import { useAudioStore } from "@/src/store/audioStore";
 import { useBookStore } from "@/src/store/bookStore";
 import { FONT_FAMILIES, THEMES, useSettingsStore } from "@/src/store/settingsStore";
+import { splitParagraphs } from "@/src/utils/text";
 
-/** Split chapter text into paragraphs (blank-line separated; fall back to single newlines). */
-function splitParagraphs(text: string): string[] {
-  if (!text) return [];
-  let parts = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
-  if (parts.length <= 1) parts = text.split(/\n/).map((p) => p.trim()).filter(Boolean);
-  return parts.length ? parts : [text];
+type Token = { text: string; word: string | null; wordIndex: number };
+
+/**
+ * Split a paragraph into tokens, keeping whitespace so it re-joins exactly.
+ * Word tokens get a running `wordIndex` (used for tap-to-select range logic);
+ * whitespace / pure-punctuation tokens get `word: null` and `wordIndex: -1`.
+ */
+function tokenize(text: string): Token[] {
+  const raw = text.split(/(\s+)/);
+  let wi = 0;
+  return raw.map((t) => {
+    if (!/[\p{L}\p{N}]/u.test(t)) return { text: t, word: null, wordIndex: -1 };
+    const word = t.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+    if (!word) return { text: t, word: null, wordIndex: -1 };
+    return { text: t, word, wordIndex: wi++ };
+  });
+}
+
+/**
+ * Reconstruct the exact phrase spanning word indices `a`..`b` (inclusive, order
+ * independent) — including the original spacing/punctuation between them.
+ */
+function phraseFromSelection(text: string, a: number, b: number): string {
+  const start = Math.min(a, b);
+  const end = Math.max(a, b);
+  const toks = tokenize(text);
+  const first = toks.findIndex((t) => t.wordIndex === start);
+  let last = -1;
+  for (let i = toks.length - 1; i >= 0; i--) {
+    if (toks[i].wordIndex === end) {
+      last = i;
+      break;
+    }
+  }
+  if (first < 0 || last < 0) return "";
+  return toks
+    .slice(first, last + 1)
+    .map((t) => t.text)
+    .join("")
+    .trim();
 }
 
 export default function ReaderScreen() {
@@ -39,9 +75,6 @@ export default function ReaderScreen() {
   const fontSize = useSettingsStore((s) => s.fontSize);
   const fontFamily = useSettingsStore((s) => s.fontFamily);
   const lineHeight = useSettingsStore((s) => s.lineHeight);
-  const ttsRate = useSettingsStore((s) => s.ttsRate);
-  const ttsPitch = useSettingsStore((s) => s.ttsPitch);
-  const ttsVoice = useSettingsStore((s) => s.ttsVoice);
   const colors = THEMES[theme];
 
   const isSpeaking = useAudioStore((s) => s.isSpeaking);
@@ -61,10 +94,15 @@ export default function ReaderScreen() {
   const setPendingScrollY = useBookStore((s) => s.setPendingScrollY);
   const setPendingParagraph = useBookStore((s) => s.setPendingParagraph);
 
-  // Word-explainer ("define") mode: tap a word → AI explanation. Off by default
-  // so normal reading/TTS/long-press-bookmark gestures are unchanged.
+  // Word-explainer ("define") mode: select a phrase → AI explanation. Off by
+  // default so normal reading/TTS/long-press-bookmark gestures are unchanged.
+  // Tap the first word then the last word of a phrase to select a range (a
+  // single tap selects one word); a floating bar then offers "Explain".
   const [defineMode, setDefineMode] = useState(false);
-  const [defineTarget, setDefineTarget] = useState<{ word: string; context: string } | null>(null);
+  const [selection, setSelection] = useState<{ para: number; start: number; end: number } | null>(
+    null,
+  );
+  const [defineTarget, setDefineTarget] = useState<{ term: string; context: string } | null>(null);
 
   const scrollRef = useRef<ScrollView>(null);
   const scrollY = useRef(0);
@@ -72,13 +110,41 @@ export default function ReaderScreen() {
   const paraOffsets = useRef<number[]>([]);
   // Paragraph we still need to scroll to once it has laid out.
   const pendingParaRef = useRef<number | null>(null);
-  // Latest speakChapter, so the auto-advance onDone callback stays fresh.
-  const speakChapterRef = useRef<(index: number, startPara?: number) => void>(() => {});
 
   const paragraphs = useMemo(
     () => splitParagraphs(chapters[currentChapter] ?? ""),
     [chapters, currentChapter],
   );
+
+  // Tap a word in define mode: first tap (or a tap in a new paragraph) sets the
+  // anchor; subsequent taps in the same paragraph move the other end so the
+  // range spans from the anchor to the tapped word.
+  const onWordPress = useCallback((para: number, wordIndex: number) => {
+    setSelection((prev) =>
+      prev && prev.para === para
+        ? { ...prev, end: wordIndex }
+        : { para, start: wordIndex, end: wordIndex },
+    );
+  }, []);
+
+  const selectedPhrase = useMemo(
+    () =>
+      selection ? phraseFromSelection(paragraphs[selection.para] ?? "", selection.start, selection.end) : "",
+    [selection, paragraphs],
+  );
+
+  const explainSelection = useCallback(() => {
+    if (!selection || !selectedPhrase) return;
+    setDefineTarget({ term: selectedPhrase, context: paragraphs[selection.para] ?? "" });
+  }, [selection, selectedPhrase, paragraphs]);
+
+  // Clear any selection when leaving define mode or changing chapter.
+  useEffect(() => {
+    if (!defineMode) setSelection(null);
+  }, [defineMode]);
+  useEffect(() => {
+    setSelection(null);
+  }, [currentChapter]);
 
   const persist = useCallback(() => {
     const b = useBookStore.getState().currentBook;
@@ -89,16 +155,11 @@ export default function ReaderScreen() {
     });
   }, []);
 
-  // Persist position + stop any read-aloud/music when leaving the screen.
+  // Persist position when leaving the screen. Audio is intentionally NOT stopped
+  // here — read-aloud + music now play app-wide (background service) and are
+  // controlled from the player bar / lock screen, surviving in-app navigation.
   useFocusEffect(
-    useCallback(
-      () => () => {
-        persist();
-        tts.stop();
-        music.stopMusic();
-      },
-      [persist],
-    ),
+    useCallback(() => () => persist(), [persist]),
   );
 
   // Toggle background music on/off, choosing a loop from the book's AI tags
@@ -123,56 +184,17 @@ export default function ReaderScreen() {
     [chapters.length, persist, setChapter],
   );
 
-  // Read a chapter aloud from `startPara`, auto-advancing to the next chapter
-  // when it finishes. Speaks the same paragraph array the reader renders so the
-  // reported segment index lines up with the on-screen paragraphs.
-  const speakChapter = useCallback(
-    (index: number, startPara = 0) => {
-      const segments = splitParagraphs(chapters[index] ?? "");
-      if (segments.length === 0) return;
-      if (index !== useBookStore.getState().currentChapter) {
-        scrollY.current = 0;
-        setChapter(index);
-      }
-      tts.speak(
-        segments,
-        startPara,
-        { rate: ttsRate, pitch: ttsPitch, voice: ttsVoice },
-        {
-          onDone: () => {
-            const next = index + 1;
-            if (next >= chapters.length) return;
-            speakChapterRef.current(next, 0);
-          },
-        },
-      );
-    },
-    [chapters, ttsRate, ttsPitch, ttsVoice, setChapter],
-  );
-  useEffect(() => {
-    speakChapterRef.current = speakChapter;
-  }, [speakChapter]);
-
-  const toggleTts = useCallback(() => {
-    if (isPaused) {
-      tts.resume();
-      return;
-    }
-    if (isSpeaking) {
-      tts.pause();
-      return;
-    }
-    void tts.ensureVietnameseTTS(); // one-time guidance if no vi-VN voice
-    speakChapter(currentChapter);
-  }, [isPaused, isSpeaking, currentChapter, speakChapter]);
+  // Read-aloud play/pause. Chapter orchestration + auto-advance live in the
+  // screen-independent playback session so they keep running in the background.
+  const toggleTts = useCallback(() => playback.togglePlayback(), []);
 
   // Jump read-aloud to a paragraph in the current chapter (progress-bar seek).
   const seekTts = useCallback(
     (para: number) => {
       const clamped = Math.max(0, Math.min(para, paragraphs.length - 1));
-      speakChapter(currentChapter, clamped);
+      playback.startChapter(currentChapter, clamped);
     },
-    [paragraphs.length, currentChapter, speakChapter],
+    [paragraphs.length, currentChapter],
   );
 
   // Follow the paragraph being read: scroll it into view as TTS advances.
@@ -338,7 +360,7 @@ export default function ReaderScreen() {
         scrollEventThrottle={100}>
         {defineMode && (
           <Text style={[styles.defineHint, { color: "#e67e22" }]}>
-            Tap any word for an AI explanation.
+            Tap the first and last word of a phrase (or one word), then tap Explain.
           </Text>
         )}
         {paragraphs.map((p, i) => (
@@ -352,15 +374,35 @@ export default function ReaderScreen() {
               text={p}
               style={paraStyle}
               defineMode={defineMode}
-              onWord={(word) => setDefineTarget({ word, context: p })}
+              selection={
+                selection && selection.para === i
+                  ? { start: Math.min(selection.start, selection.end), end: Math.max(selection.start, selection.end) }
+                  : null
+              }
+              onWord={(wordIndex) => onWordPress(i, wordIndex)}
             />
           </Pressable>
         ))}
       </ScrollView>
 
+      {defineMode && selection && selectedPhrase !== "" && (
+        <View style={[styles.selectBar, { backgroundColor: colors.background, borderTopColor: colors.muted }]}>
+          <Text style={[styles.selectPhrase, { color: colors.text }]} numberOfLines={1}>
+            「{selectedPhrase}」
+          </Text>
+          <Pressable onPress={() => setSelection(null)} hitSlop={10}>
+            <Ionicons name="close" size={20} color={colors.muted} />
+          </Pressable>
+          <Pressable onPress={explainSelection} style={styles.explainBtn} hitSlop={8}>
+            <Ionicons name="sparkles-outline" size={16} color="#fff" />
+            <Text style={styles.explainBtnText}>Explain</Text>
+          </Pressable>
+        </View>
+      )}
+
       {defineTarget && book && (
         <WordExplainer
-          word={defineTarget.word}
+          term={defineTarget.term}
           context={defineTarget.context}
           bookId={book.id}
           colors={colors}
@@ -455,33 +497,37 @@ function TtsProgress({
 /**
  * Renders a paragraph. In normal mode it's a plain `<Text>`. In define mode
  * every word becomes a tappable nested `<Text>` (nested Text keeps the line
- * flow intact) that reports the tapped word, with surrounding punctuation
- * stripped, to `onWord`.
+ * flow intact) that reports the tapped word's index to `onWord`. Words whose
+ * index falls inside `selection` (inclusive range) are highlighted.
  */
 function ParagraphBody({
   text,
   style,
   defineMode,
+  selection,
   onWord,
 }: {
   text: string;
   style: object;
   defineMode: boolean;
-  onWord: (word: string) => void;
+  selection: { start: number; end: number } | null;
+  onWord: (wordIndex: number) => void;
 }) {
   if (!defineMode) return <Text style={style}>{text}</Text>;
 
-  // Split keeping whitespace tokens so spacing is preserved on re-join.
-  const tokens = text.split(/(\s+)/);
+  const tokens = tokenize(text);
   return (
     <Text style={style}>
       {tokens.map((tok, i) => {
-        if (!/[\p{L}\p{N}]/u.test(tok)) return tok; // whitespace / pure punctuation
-        const word = tok.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
-        if (!word) return tok;
+        if (tok.word == null) return tok.text; // whitespace / pure punctuation
+        const selected =
+          selection != null && tok.wordIndex >= selection.start && tok.wordIndex <= selection.end;
         return (
-          <Text key={i} onPress={() => onWord(word)} style={styles.defineWord}>
-            {tok}
+          <Text
+            key={i}
+            onPress={() => onWord(tok.wordIndex)}
+            style={[styles.defineWord, selected && styles.defineWordSelected]}>
+            {tok.text}
           </Text>
         );
       })}
@@ -490,17 +536,18 @@ function ParagraphBody({
 }
 
 /**
- * Modal that explains a tapped word in context via Gemini. Cached per word
- * (book-scoped) in `ai_cache` so re-tapping the same word costs no quota.
+ * Modal that explains a selected word or phrase in context via Gemini. Cached
+ * per term (book-scoped) in `ai_cache` so re-selecting the same term costs no
+ * quota.
  */
 function WordExplainer({
-  word,
+  term,
   context,
   bookId,
   colors,
   onClose,
 }: {
-  word: string;
+  term: string;
   context: string;
   bookId: string;
   colors: { text: string; muted: string; background: string };
@@ -519,7 +566,7 @@ function WordExplainer({
       return;
     }
 
-    const cacheKey = `word_${word.toLowerCase()}`;
+    const cacheKey = `word_${term.toLowerCase()}`;
     const cached = getAICache(bookId, cacheKey);
     if (cached) {
       setText(cached);
@@ -528,27 +575,27 @@ function WordExplainer({
 
     (async () => {
       try {
-        const result = await gemini.explainWord(word, context);
+        const result = await gemini.explainWord(term, context);
         if (!alive) return;
         setText(result);
         if (result) setAICache(bookId, cacheKey, result);
       } catch (e) {
-        if (alive) setError(e instanceof Error ? e.message : "Could not explain this word.");
+        if (alive) setError(e instanceof Error ? e.message : "Could not explain this selection.");
       }
     })();
 
     return () => {
       alive = false;
     };
-  }, [word, context, bookId]);
+  }, [term, context, bookId]);
 
   return (
     <Modal transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.modalBackdrop} onPress={onClose}>
         <Pressable style={[styles.modalCard, { backgroundColor: colors.background, borderColor: colors.muted }]}>
           <View style={styles.modalHeader}>
-            <Text style={[styles.modalWord, { color: colors.text }]} numberOfLines={1}>
-              {word}
+            <Text style={[styles.modalWord, { color: colors.text }]} numberOfLines={2}>
+              {term}
             </Text>
             <Pressable onPress={onClose} hitSlop={10}>
               <Ionicons name="close" size={22} color={colors.muted} />
@@ -610,6 +657,26 @@ const styles = StyleSheet.create({
   progressLabel: { fontSize: 12, fontWeight: "500", minWidth: 56, textAlign: "right" },
   defineHint: { fontSize: 13, fontWeight: "600", marginBottom: 12 },
   defineWord: { textDecorationLine: "underline", textDecorationStyle: "dotted" },
+  defineWordSelected: { backgroundColor: "rgba(230,126,34,0.3)" },
+  selectBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  selectPhrase: { flex: 1, fontSize: 15, fontWeight: "600" },
+  explainBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#e67e22",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  explainBtnText: { color: "#fff", fontSize: 14, fontWeight: "700" },
   modalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.5)",

@@ -24,6 +24,8 @@ interface KBState {
   error: string | null;
   /** epoch ms when a rate-limit-paused job will auto-retry (null if not scheduled). */
   retryAt: number | null;
+  /** UI-only: banner collapsed to a compact pill so it stops hogging space. */
+  minimized: boolean;
   /** Shallow-merge a patch (used by the runner). */
   patch: (partial: Partial<Omit<KBState, "patch">>) => void;
 }
@@ -33,5 +35,6 @@ export const useKBStore = create<KBState>((set) => ({
   status: "idle",
   error: null,
   retryAt: null,
+  minimized: false,
   patch: (partial) => set(partial),
 }));

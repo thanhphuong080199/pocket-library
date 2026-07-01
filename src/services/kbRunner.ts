@@ -42,6 +42,8 @@ const MIN_RETRY_MS = 30_000;
 
 let running = false;
 let cancelRequested = false;
+/** Aborts the in-flight Gemini request so Cancel takes effect immediately. */
+let abortController: AbortController | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
 const patch = (p: Parameters<ReturnType<typeof useKBStore.getState>["patch"]>[0]) =>
@@ -114,7 +116,8 @@ export function hydrateInterrupted(): void {
 export function cancelAnalysis(): void {
   clearRetry();
   if (running) {
-    cancelRequested = true; // the loop pauses at the next chunk boundary
+    cancelRequested = true;
+    abortController?.abort(); // kill the in-flight request so cancel is immediate
   } else {
     patch({ status: "paused", retryAt: null });
   }
@@ -156,7 +159,7 @@ async function beginRun(seriesId: string, bookId: string, fresh: boolean): Promi
   }
 
   const job: KBJob = { seriesId, bookId, title, volumeNumber, current: startChunk, total: chunks.length };
-  patch({ job, status: "running", error: null, retryAt: null });
+  patch({ job, status: "running", error: null, retryAt: null, minimized: false });
   setAnalysisState({ seriesId, bookId, volumeNumber, nextChunk: startChunk, totalChunks: chunks.length, status: "running" });
 
   await runLoop(job, chunks, startChunk);
@@ -165,6 +168,7 @@ async function beginRun(seriesId: string, bookId: string, fresh: boolean): Promi
 async function runLoop(job: KBJob, chunks: BookChunk[], startChunk: number): Promise<void> {
   running = true;
   cancelRequested = false;
+  abortController = new AbortController();
   clearRetry();
 
   const save = (nextChunk: number, status: "running" | "paused" | "error" | "done") =>
@@ -190,8 +194,15 @@ async function runLoop(job: KBJob, chunks: BookChunk[], startChunk: number): Pro
 
       patch({ job: { ...job, current: i } }); // chunk i is now in flight
       try {
-        await extractAndMergeChunk(job.seriesId, snapshot, chunks[i], job.volumeNumber);
+        await extractAndMergeChunk(job.seriesId, snapshot, chunks[i], job.volumeNumber, abortController.signal);
       } catch (e) {
+        // A user cancel (aborted request) pauses at the current chunk, keeping
+        // the checkpoint so it stays resumable.
+        if (cancelRequested || abortController.signal.aborted) {
+          save(i, "paused");
+          patch({ job: { ...job, current: i }, status: "paused", retryAt: null });
+          return;
+        }
         if (e instanceof GeminiRateLimitError) {
           save(i, "paused"); // stay on this chunk
           if (cancelRequested) {

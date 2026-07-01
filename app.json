@@ -41,7 +41,12 @@
         }
       ],
       "expo-sqlite",
-      "expo-audio"
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

@@ -90,6 +90,16 @@ export interface RunOptions {
   json?: boolean;
   /** Raise the output cap so big deltas don't truncate mid-JSON. */
   maxOutputTokens?: number;
+  /** Abort the in-flight request (e.g. user cancels a long KB pass). */
+  signal?: AbortSignal;
+}
+
+/** Raised when a request was aborted via `RunOptions.signal` (e.g. user cancel). */
+export class GeminiAbortError extends GeminiError {
+  constructor(cause?: unknown) {
+    super("Gemini request was cancelled.", cause);
+    this.name = "GeminiAbortError";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,16 +191,21 @@ export async function runPrompt(prompt: string, opts?: RunOptions): Promise<stri
   const request = generationConfig
     ? { contents: [{ role: "user", parts: [{ text: fullPrompt }] }], generationConfig }
     : fullPrompt;
+  const requestOptions = opts?.signal ? { signal: opts.signal } : undefined;
 
   let lastError: unknown;
   let sawRateLimit = false;
   for (const id of order) {
     try {
-      const result = await getModel(id).generateContent(request);
+      const result = await getModel(id).generateContent(request, requestOptions);
       cooldownUntil.delete(id); // recovered — clear any stale cooldown
       return result.response.text();
     } catch (e) {
       lastError = e;
+      // A user-triggered abort must NOT fall through to other models — bail now.
+      if (opts?.signal?.aborted || (e as { name?: string })?.name === "AbortError") {
+        throw new GeminiAbortError(e);
+      }
       const status = httpStatus(e);
       const cooldown = cooldownForStatus(status);
       if (cooldown === null) {
@@ -321,8 +336,9 @@ ${textSample}
  */
 export async function explainWord(word: string, context: string): Promise<string> {
   const prompt = `
-In the context of this story passage, briefly explain what "${word}" means.
-Answer in Vietnamese, under 3 sentences, simple language. Plain text only.
+In the context of this story passage, briefly explain the meaning of the word or
+phrase "${word}". Answer in Vietnamese, under 3 sentences, simple language. Plain
+text only.
 
 Passage: "${context}"
 `.trim();

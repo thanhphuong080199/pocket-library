@@ -16,6 +16,14 @@ interface AudioState {
   /** total segments (paragraphs) in the chapter being read */
   ttsTotalSegments: number;
 
+  // Now-playing display (for the app-wide player bar + lock-screen notification).
+  // Set by the playback session so any screen can render controls without owning
+  // the reader's local state.
+  bookTitle: string;
+  chapterTitle: string;
+  chapterIndex: number;
+  totalChapters: number;
+
   // Music
   isMusicPlaying: boolean;
   currentTrack: string | null;
@@ -25,6 +33,12 @@ interface AudioState {
   setTtsChapter: (ttsChapter: number) => void;
   setTtsSegment: (ttsSegment: number) => void;
   setTtsTotalSegments: (ttsTotalSegments: number) => void;
+  setNowPlaying: (info: {
+    bookTitle: string;
+    chapterTitle: string;
+    chapterIndex: number;
+    totalChapters: number;
+  }) => void;
   setMusicPlaying: (isMusicPlaying: boolean) => void;
   setCurrentTrack: (currentTrack: string | null) => void;
   reset: () => void;
@@ -36,6 +50,10 @@ export const useAudioStore = create<AudioState>((set) => ({
   ttsChapter: 0,
   ttsSegment: -1,
   ttsTotalSegments: 0,
+  bookTitle: "",
+  chapterTitle: "",
+  chapterIndex: 0,
+  totalChapters: 0,
   isMusicPlaying: false,
   currentTrack: null,
 
@@ -44,6 +62,8 @@ export const useAudioStore = create<AudioState>((set) => ({
   setTtsChapter: (ttsChapter) => set({ ttsChapter }),
   setTtsSegment: (ttsSegment) => set({ ttsSegment }),
   setTtsTotalSegments: (ttsTotalSegments) => set({ ttsTotalSegments }),
+  setNowPlaying: ({ bookTitle, chapterTitle, chapterIndex, totalChapters }) =>
+    set({ bookTitle, chapterTitle, chapterIndex, totalChapters }),
   setMusicPlaying: (isMusicPlaying) => set({ isMusicPlaying }),
   setCurrentTrack: (currentTrack) => set({ currentTrack }),
   reset: () =>
@@ -52,6 +72,10 @@ export const useAudioStore = create<AudioState>((set) => ({
       isPaused: false,
       ttsSegment: -1,
       ttsTotalSegments: 0,
+      bookTitle: "",
+      chapterTitle: "",
+      chapterIndex: 0,
+      totalChapters: 0,
       isMusicPlaying: false,
       currentTrack: null,
     }),

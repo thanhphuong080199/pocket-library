@@ -4,6 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import 'react-native-reanimated';
 
+import { AudioPlayerBar } from '@/src/components/AudioPlayerBar';
 import { KbProgressBanner } from '@/src/components/KbProgressBanner';
 import { PdfExtractorHost } from '@/src/components/PdfExtractorHost';
 import { useColorScheme } from '@/hooks/use-color-scheme';
@@ -33,6 +34,7 @@ export default function RootLayout() {
         <Stack.Screen name="bookmarks" options={{ headerShown: false }} />
       </Stack>
       <PdfExtractorHost />
+      <AudioPlayerBar />
       <KbProgressBanner />
       <StatusBar style="auto" />
     </ThemeProvider>
