@@ -64,6 +64,22 @@ class PocketTtsModule : Module() {
     Function("resume") { sendAction(TtsForegroundService.ACTION_RESUME) }
     Function("stop") { sendAction(TtsForegroundService.ACTION_STOP) }
 
+    Function("setOptions") { rate: Double, pitch: Double, voice: String? ->
+      val intent = serviceIntent(TtsForegroundService.ACTION_SET_OPTIONS).apply {
+        putExtra(TtsForegroundService.EXTRA_RATE, rate.toFloat())
+        putExtra(TtsForegroundService.EXTRA_PITCH, pitch.toFloat())
+        putExtra(TtsForegroundService.EXTRA_VOICE, voice)
+      }
+      ContextCompat.startForegroundService(context, intent)
+    }
+
+    Function("skip") { delta: Int ->
+      val intent = serviceIntent(TtsForegroundService.ACTION_SKIP).apply {
+        putExtra(TtsForegroundService.EXTRA_DELTA, delta)
+      }
+      ContextCompat.startForegroundService(context, intent)
+    }
+
     Function("setNowPlaying") { title: String, chapter: String ->
       val intent = serviceIntent(TtsForegroundService.ACTION_NOWPLAYING).apply {
         putExtra(TtsForegroundService.EXTRA_TITLE, title)

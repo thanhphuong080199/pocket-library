@@ -40,6 +40,10 @@ interface PocketTtsNative {
   pause: () => void;
   resume: () => void;
   stop: () => void;
+  /** Update rate/pitch/voice on the live session (re-speaks the current chunk). */
+  setOptions: (rate: number, pitch: number, voice: string | null) => void;
+  /** Jump ±delta chunks (sentences); while paused only moves the cursor. */
+  skip: (delta: number) => void;
   /** Update the lock-screen / notification metadata. */
   setNowPlaying: (title: string, chapter: string) => void;
   getVoices: () => Promise<NativeVoice[]>;
@@ -73,6 +77,14 @@ export function resume(): void {
 
 export function stop(): void {
   Native.stop();
+}
+
+export function setOptions(rate: number, pitch: number, voice: string | null): void {
+  Native.setOptions(rate, pitch, voice);
+}
+
+export function skip(delta: number): void {
+  Native.skip(delta);
 }
 
 export function setNowPlaying(title: string, chapter: string): void {

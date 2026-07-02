@@ -6,6 +6,7 @@ import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-nati
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { resetDatabase } from "@/src/services/db";
+import * as playback from "@/src/services/playbackSession";
 import { useBookStore } from "@/src/store/bookStore";
 import {
   FONT_FAMILIES,
@@ -126,15 +127,27 @@ export default function SettingsScreen() {
         <Stepper
           label="Speed"
           value={`${s.ttsRate.toFixed(1)}×`}
-          onDec={() => s.setTtsRate(Math.round((s.ttsRate - 0.1) * 10) / 10)}
-          onInc={() => s.setTtsRate(Math.round((s.ttsRate + 0.1) * 10) / 10)}
+          onDec={() => {
+            s.setTtsRate(Math.round((s.ttsRate - 0.1) * 10) / 10);
+            playback.applyTtsOptions(); // live-apply to a running read-aloud
+          }}
+          onInc={() => {
+            s.setTtsRate(Math.round((s.ttsRate + 0.1) * 10) / 10);
+            playback.applyTtsOptions();
+          }}
           colors={colors}
         />
         <Stepper
           label="Pitch"
           value={s.ttsPitch.toFixed(1)}
-          onDec={() => s.setTtsPitch(Math.round((s.ttsPitch - 0.1) * 10) / 10)}
-          onInc={() => s.setTtsPitch(Math.round((s.ttsPitch + 0.1) * 10) / 10)}
+          onDec={() => {
+            s.setTtsPitch(Math.round((s.ttsPitch - 0.1) * 10) / 10);
+            playback.applyTtsOptions();
+          }}
+          onInc={() => {
+            s.setTtsPitch(Math.round((s.ttsPitch + 0.1) * 10) / 10);
+            playback.applyTtsOptions();
+          }}
           colors={colors}
         />
         <Text style={[styles.hint, { color: colors.muted }]}>

@@ -111,7 +111,9 @@ export function hydrateInterrupted(): void {
 
 /**
  * Stop the current run (or a scheduled auto-retry). The checkpoint is kept, so
- * it stays resumable; the UI can offer "Resume".
+ * it stays resumable; the UI can offer "Resume". The checkpoint is marked
+ * `cancelled` so the banner does NOT rehydrate on the next app launch —
+ * resuming is only offered from the book detail screen.
  */
 export function cancelAnalysis(): void {
   clearRetry();
@@ -119,6 +121,16 @@ export function cancelAnalysis(): void {
     cancelRequested = true;
     abortController?.abort(); // kill the in-flight request so cancel is immediate
   } else {
+    // Not running (e.g. waiting on a rate-limit retry): the checkpoint on disk
+    // still says "paused", which would rehydrate the banner — mark it cancelled.
+    const job = useKBStore.getState().job;
+    if (job) {
+      const cp = getAnalysisState(job.seriesId);
+      if (cp && cp.status !== "done") {
+        const { updatedAt: _updatedAt, ...rest } = cp;
+        setAnalysisState({ ...rest, status: "cancelled" });
+      }
+    }
     patch({ status: "paused", retryAt: null });
   }
 }
@@ -171,7 +183,7 @@ async function runLoop(job: KBJob, chunks: BookChunk[], startChunk: number): Pro
   abortController = new AbortController();
   clearRetry();
 
-  const save = (nextChunk: number, status: "running" | "paused" | "error" | "done") =>
+  const save = (nextChunk: number, status: "running" | "paused" | "error" | "done" | "cancelled") =>
     setAnalysisState({
       seriesId: job.seriesId,
       bookId: job.bookId,
@@ -187,7 +199,7 @@ async function runLoop(job: KBJob, chunks: BookChunk[], startChunk: number): Pro
 
     for (let i = startChunk; i < chunks.length; i++) {
       if (cancelRequested) {
-        save(i, "paused");
+        save(i, "cancelled");
         patch({ job: { ...job, current: i }, status: "paused", retryAt: null });
         return;
       }
@@ -199,12 +211,12 @@ async function runLoop(job: KBJob, chunks: BookChunk[], startChunk: number): Pro
         // A user cancel (aborted request) pauses at the current chunk, keeping
         // the checkpoint so it stays resumable.
         if (cancelRequested || abortController.signal.aborted) {
-          save(i, "paused");
+          save(i, "cancelled");
           patch({ job: { ...job, current: i }, status: "paused", retryAt: null });
           return;
         }
         if (e instanceof GeminiRateLimitError) {
-          save(i, "paused"); // stay on this chunk
+          save(i, cancelRequested ? "cancelled" : "paused"); // stay on this chunk
           if (cancelRequested) {
             patch({ job: { ...job, current: i }, status: "paused", retryAt: null });
           } else {
