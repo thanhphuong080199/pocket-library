@@ -62,6 +62,29 @@ export function startChapter(index: number, startPara = 0): void {
   );
 }
 
+/** Skip read-aloud forward one sentence (player-bar "next"). */
+export function nextSentence(): void {
+  tts.skipSentence(1);
+}
+
+/** Skip read-aloud back one sentence (player-bar "previous"). */
+export function prevSentence(): void {
+  tts.skipSentence(-1);
+}
+
+// Debounce so rapid stepper taps re-speak the current sentence once, not per tap.
+let optionsTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Push the settings-store rate/pitch/voice into a live read-aloud session. */
+export function applyTtsOptions(): void {
+  if (optionsTimer) clearTimeout(optionsTimer);
+  optionsTimer = setTimeout(() => {
+    optionsTimer = null;
+    const { ttsRate, ttsPitch, ttsVoice } = useSettingsStore.getState();
+    tts.setOptions({ rate: ttsRate, pitch: ttsPitch, voice: ttsVoice });
+  }, 400);
+}
+
 /** Advance read-aloud to the next chapter (lock-screen "next"). No-op at the end. */
 export function nextChapter(): void {
   const { currentChapter, chapters } = useBookStore.getState();

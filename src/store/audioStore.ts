@@ -28,6 +28,9 @@ interface AudioState {
   isMusicPlaying: boolean;
   currentTrack: string | null;
 
+  /** Player bar collapsed to a pill. Transient — a fresh session starts expanded. */
+  playerMinimized: boolean;
+
   setSpeaking: (isSpeaking: boolean) => void;
   setPaused: (isPaused: boolean) => void;
   setTtsChapter: (ttsChapter: number) => void;
@@ -41,6 +44,7 @@ interface AudioState {
   }) => void;
   setMusicPlaying: (isMusicPlaying: boolean) => void;
   setCurrentTrack: (currentTrack: string | null) => void;
+  setPlayerMinimized: (playerMinimized: boolean) => void;
   reset: () => void;
 }
 
@@ -56,6 +60,7 @@ export const useAudioStore = create<AudioState>((set) => ({
   totalChapters: 0,
   isMusicPlaying: false,
   currentTrack: null,
+  playerMinimized: false,
 
   setSpeaking: (isSpeaking) => set({ isSpeaking }),
   setPaused: (isPaused) => set({ isPaused }),
@@ -66,6 +71,7 @@ export const useAudioStore = create<AudioState>((set) => ({
     set({ bookTitle, chapterTitle, chapterIndex, totalChapters }),
   setMusicPlaying: (isMusicPlaying) => set({ isMusicPlaying }),
   setCurrentTrack: (currentTrack) => set({ currentTrack }),
+  setPlayerMinimized: (playerMinimized) => set({ playerMinimized }),
   reset: () =>
     set({
       isSpeaking: false,
@@ -78,5 +84,6 @@ export const useAudioStore = create<AudioState>((set) => ({
       totalChapters: 0,
       isMusicPlaying: false,
       currentTrack: null,
+      playerMinimized: false,
     }),
 }));

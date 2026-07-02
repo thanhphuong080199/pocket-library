@@ -183,8 +183,25 @@ export function resume(): void {
 /** Stop playback entirely and clear the session. */
 export function stop(): void {
   sessionCallbacks = {};
-  PocketTts.stop();
+  const audio = useAudioStore.getState();
+  // Only hit native when a session is live — a stop while idle would spin up the
+  // foreground service just to kill it (notification flash, pointless churn).
+  if (audio.isSpeaking || audio.isPaused) PocketTts.stop();
   setIdle();
+}
+
+/** Apply new rate/pitch/voice to the live session (re-speaks the current sentence). */
+export function setOptions(options: TTSOptions): void {
+  const audio = useAudioStore.getState();
+  if (!audio.isSpeaking && !audio.isPaused) return;
+  PocketTts.setOptions(options.rate ?? 1.0, options.pitch ?? 1.0, options.voice ?? null);
+}
+
+/** Skip ±delta sentences within the current chapter; while paused only moves the cursor. */
+export function skipSentence(delta: number): void {
+  const audio = useAudioStore.getState();
+  if (!audio.isSpeaking && !audio.isPaused) return;
+  PocketTts.skip(delta);
 }
 
 /** True while the engine is actively producing speech (not paused/idle). */

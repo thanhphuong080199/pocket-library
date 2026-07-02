@@ -9,7 +9,14 @@ Living tracker for the build. Update the status box + checklists as work lands. 
 ## Current status
 
 - **Phase:** 4 done + **Phase 5 KB engine** built, now **background + resumable**. Whole-book analysis (`deltaExtractor` + `kbRunner`) runs detached with an app-wide progress banner, big 300K chunks + JSON mode to dodge the rate limit, and **pause/auto-resume + checkpoint** so a rate-limit or app-close doesn't lose progress. **Pending on-device test.** Remaining Step B: series-assign import UX, `character/[id]` screen, cross-volume series view.
-- **Last updated:** 2026-07-01
+- **2026-07-02 — bug-fix + player UX round (verified on emulator with a real EPUB):**
+  - **Fixed chapter-nav crash:** `TtsForegroundService.onStartCommand` now calls `startForeground()` unconditionally before dispatching (every `startForegroundService()` start must, even ACTION_STOP — skipping it kills the app); `tts.stop()` no longer spins up the service when idle.
+  - **Fixed silent first Play tap + ignored voice settings:** speak requests that race the async TTS engine init are stored (`pendingStart`) and replayed from the init callback; rate/pitch/voice are service fields applied inside `speakFrom()` so resume/replay/skip all honor them.
+  - **Live TTS options:** new native `ACTION_SET_OPTIONS` (re-speaks current sentence with new rate/pitch/voice) + `ACTION_SKIP` (±1 sentence chunk; while paused just moves the cursor). JS: `tts.setOptions/skipSentence`, `playback.nextSentence/prevSentence/applyTtsOptions` (400ms debounce). Settings-tab steppers also live-apply.
+  - **Player bar:** collapsible (pill bottom-left, mirrors KB banner's bottom-right pill), hosts the paragraph seek bar (moved out of the reader), sentence prev/next on tap + chapter on long-press, inline speed/pitch steppers + vi-VN voice picker (scroll-capped list).
+  - **Reader:** bookmarked paragraphs get a left accent bar (loaded per chapter on focus); seek bar removed.
+  - **Analysis banner:** explicit Cancel writes checkpoint status `cancelled` → no rehydrate on relaunch (rate-limit/app-kill still rehydrate); book detail Resume still works.
+- **Last updated:** 2026-07-02
 - **App boots in Expo Go:** not yet verified on-device; Metro bundle compiles. Library/Reader/Settings tabs + Search/Bookmarks screens wired.
 
 ### Key environment decisions (locked)

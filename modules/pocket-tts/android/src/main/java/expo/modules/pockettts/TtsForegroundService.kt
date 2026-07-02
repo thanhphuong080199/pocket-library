@@ -53,6 +53,16 @@ class TtsForegroundService : Service() {
   private var bookTitle = ""
   private var chapterTitle = ""
 
+  // Engine options live here (not per-request) so every (re)start path —
+  // fresh speak, resume-after-pause, pending replay, live update — applies them.
+  private var rate = 1f
+  private var pitch = 1f
+  private var voiceName: String? = null
+
+  // A speak request that arrived before the async TTS engine init finished;
+  // replayed from the init callback (otherwise the first Play tap is silent).
+  private var pendingStart: Int? = null
+
   // A pending "nothing is playing, shut down" check, cancelled if new speech arrives.
   private val idleStop = Runnable { if (!isActivelySpeaking()) stopEverything() }
 
@@ -63,21 +73,38 @@ class TtsForegroundService : Service() {
     audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
     setupMediaSession()
     tts = TextToSpeech(applicationContext) { status ->
-      ttsReady = status == TextToSpeech.SUCCESS
-      if (ttsReady) {
-        tts.language = Locale("vi", "VN")
-        tts.setAudioAttributes(
-          AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_MEDIA)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build(),
-        )
-        tts.setOnUtteranceProgressListener(progressListener)
+      main.post {
+        ttsReady = status == TextToSpeech.SUCCESS
+        if (ttsReady) {
+          tts.language = Locale("vi", "VN")
+          tts.setAudioAttributes(
+            AudioAttributes.Builder()
+              .setUsage(AudioAttributes.USAGE_MEDIA)
+              .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+              .build(),
+          )
+          tts.setOnUtteranceProgressListener(progressListener)
+          // Replay a speak request that raced the engine init (unless the user
+          // paused in the meantime — then resumeInternal consumes pendingStart).
+          val start = pendingStart
+          if (start != null && !paused) {
+            pendingStart = null
+            speakFrom(start)
+            setPlaybackState(PlaybackStateCompat.STATE_PLAYING)
+          }
+        } else {
+          PocketTtsModule.dispatch("onError", mapOf("message" to "TTS engine failed to initialize"))
+          stopEverything()
+        }
       }
     }
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    // Every start arrives via Context.startForegroundService(), which REQUIRES a
+    // matching startForeground() — even when the action immediately stops the
+    // service. Skipping it crashes the app (ForegroundServiceDidNotStartInTime).
+    startForegroundNow()
     when (intent?.action) {
       ACTION_SPEAK -> handleSpeak(intent)
       ACTION_PAUSE -> pauseInternal(fromRemote = false)
@@ -92,6 +119,8 @@ class TtsForegroundService : Service() {
         updateMetadata()
         startForegroundNow()
       }
+      ACTION_SET_OPTIONS -> handleSetOptions(intent)
+      ACTION_SKIP -> handleSkip(intent)
       ACTION_REMOTE_NEXT -> PocketTtsModule.dispatch("onRemoteCommand", mapOf("command" to "next"))
       ACTION_REMOTE_PREV -> PocketTtsModule.dispatch("onRemoteCommand", mapOf("command" to "prev"))
     }
@@ -103,37 +132,73 @@ class TtsForegroundService : Service() {
     val chunks = intent.getStringArrayListExtra(EXTRA_CHUNKS) ?: arrayListOf()
     val segments = intent.getIntegerArrayListExtra(EXTRA_SEGMENTS) ?: arrayListOf()
     val startSegment = intent.getIntExtra(EXTRA_START_SEGMENT, 0)
-    val rate = intent.getFloatExtra(EXTRA_RATE, 1f)
-    val pitch = intent.getFloatExtra(EXTRA_PITCH, 1f)
-    val voiceName = intent.getStringExtra(EXTRA_VOICE)
+    rate = intent.getFloatExtra(EXTRA_RATE, 1f)
+    pitch = intent.getFloatExtra(EXTRA_PITCH, 1f)
+    voiceName = intent.getStringExtra(EXTRA_VOICE)
 
     queue = chunks.mapIndexed { i, text -> Chunk(text, segments.getOrElse(i) { 0 }) }
     // Skip to the first chunk at/after the requested paragraph (progress-bar seek).
     val start = queue.indexOfFirst { it.segment >= startSegment }.let { if (it < 0) 0 else it }
 
-    if (queue.isEmpty()) return
+    if (queue.isEmpty()) {
+      stopEverything()
+      return
+    }
     startForegroundNow()
     requestFocus()
 
-    applyEngineOptions(rate, pitch, voiceName)
     paused = false
     lastSegment = -1
+    if (!ttsReady) {
+      // Engine still initializing — remember the request; the init callback replays it.
+      pendingStart = start
+      return
+    }
+    pendingStart = null
     speakFrom(start)
     setPlaybackState(PlaybackStateCompat.STATE_PLAYING)
   }
 
-  private fun applyEngineOptions(rate: Float, pitch: Float, voiceName: String?) {
+  private fun handleSetOptions(intent: Intent) {
+    rate = intent.getFloatExtra(EXTRA_RATE, rate)
+    pitch = intent.getFloatExtra(EXTRA_PITCH, pitch)
+    if (intent.hasExtra(EXTRA_VOICE)) voiceName = intent.getStringExtra(EXTRA_VOICE)
+    // Already-queued utterances keep the old engine settings, so re-speak from the
+    // current chunk. While paused (or before init) just store; resume/replay applies.
+    if (!paused && queue.isNotEmpty() && ttsReady && pendingStart == null) {
+      speakFrom(index)
+    }
+  }
+
+  /** Jump ±N chunks (sentences). While paused, only moves the cursor. */
+  private fun handleSkip(intent: Intent) {
+    if (queue.isEmpty() || !ttsReady) return
+    val to = (index + intent.getIntExtra(EXTRA_DELTA, 0)).coerceIn(0, queue.size - 1)
+    if (paused) {
+      index = to
+    } else {
+      speakFrom(to)
+      setPlaybackState(PlaybackStateCompat.STATE_PLAYING)
+    }
+  }
+
+  private fun applyEngineOptions() {
     if (!ttsReady) return
     tts.setSpeechRate(rate)
     tts.setPitch(pitch)
-    if (voiceName != null) {
-      tts.voices?.firstOrNull { it.name == voiceName }?.let { tts.voice = it }
+    val name = voiceName
+    if (name != null) {
+      tts.voices?.firstOrNull { it.name == name }?.let { tts.voice = it }
+    } else {
+      // Back to the default vi-VN voice (a previously selected voice would otherwise stick).
+      tts.language = Locale("vi", "VN")
     }
   }
 
   /** (Re)start speaking the queue from position [from], chaining natively. */
   private fun speakFrom(from: Int) {
     if (!ttsReady) return
+    applyEngineOptions()
     index = from
     tts.stop()
     for (i in from until queue.size) {
@@ -186,8 +251,15 @@ class TtsForegroundService : Service() {
     paused = false
     startForegroundNow()
     requestFocus()
-    speakFrom(index)
-    setPlaybackState(PlaybackStateCompat.STATE_PLAYING)
+    if (!ttsReady) {
+      // Engine still initializing; the init callback replays from here.
+      pendingStart = pendingStart ?: index
+    } else {
+      val from = pendingStart ?: index
+      pendingStart = null
+      speakFrom(from)
+      setPlaybackState(PlaybackStateCompat.STATE_PLAYING)
+    }
     if (fromRemote) PocketTtsModule.dispatch("onRemoteCommand", mapOf("command" to "play"))
   }
 
@@ -200,6 +272,7 @@ class TtsForegroundService : Service() {
     index = 0
     lastSegment = -1
     paused = false
+    pendingStart = null
     abandonFocus()
     setPlaybackState(PlaybackStateCompat.STATE_STOPPED)
     mediaSession.isActive = false
@@ -384,6 +457,8 @@ class TtsForegroundService : Service() {
     const val ACTION_RESUME = "expo.modules.pockettts.RESUME"
     const val ACTION_STOP = "expo.modules.pockettts.STOP"
     const val ACTION_NOWPLAYING = "expo.modules.pockettts.NOWPLAYING"
+    const val ACTION_SET_OPTIONS = "expo.modules.pockettts.SET_OPTIONS"
+    const val ACTION_SKIP = "expo.modules.pockettts.SKIP"
     const val ACTION_REMOTE_NEXT = "expo.modules.pockettts.REMOTE_NEXT"
     const val ACTION_REMOTE_PREV = "expo.modules.pockettts.REMOTE_PREV"
 
@@ -393,6 +468,7 @@ class TtsForegroundService : Service() {
     const val EXTRA_RATE = "rate"
     const val EXTRA_PITCH = "pitch"
     const val EXTRA_VOICE = "voice"
+    const val EXTRA_DELTA = "delta"
     const val EXTRA_TITLE = "title"
     const val EXTRA_CHAPTER = "chapter"
 

@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  LayoutChangeEvent,
   Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
@@ -14,10 +13,9 @@ import {
   Text,
   View,
 } from "react-native";
-import type { GestureResponderEvent } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { addBookmark, getAICache, setAICache, updateBookPosition } from "@/src/services/db";
+import { addBookmark, getAICache, getBookmarks, setAICache, updateBookPosition } from "@/src/services/db";
 import * as gemini from "@/src/services/gemini";
 import * as music from "@/src/services/music";
 import * as playback from "@/src/services/playbackSession";
@@ -80,7 +78,6 @@ export default function ReaderScreen() {
   const isSpeaking = useAudioStore((s) => s.isSpeaking);
   const isPaused = useAudioStore((s) => s.isPaused);
   const ttsSegment = useAudioStore((s) => s.ttsSegment);
-  const ttsTotalSegments = useAudioStore((s) => s.ttsTotalSegments);
   const ttsActive = isSpeaking || isPaused;
   const isMusicPlaying = useAudioStore((s) => s.isMusicPlaying);
   const musicAvailable = music.isMusicAvailable();
@@ -98,6 +95,9 @@ export default function ReaderScreen() {
   // default so normal reading/TTS/long-press-bookmark gestures are unchanged.
   // Tap the first word then the last word of a phrase to select a range (a
   // single tap selects one word); a floating bar then offers "Explain".
+  // Paragraph indices bookmarked in the current chapter (drawn with an accent).
+  const [bookmarked, setBookmarked] = useState<Set<number>>(new Set());
+
   const [defineMode, setDefineMode] = useState(false);
   const [selection, setSelection] = useState<{ para: number; start: number; end: number } | null>(
     null,
@@ -162,6 +162,25 @@ export default function ReaderScreen() {
     useCallback(() => () => persist(), [persist]),
   );
 
+  // Bookmarked paragraphs of the current chapter. Reloaded on focus (covers
+  // deletions made on the bookmarks screen) and on chapter change.
+  useFocusEffect(
+    useCallback(() => {
+      const b = useBookStore.getState().currentBook;
+      if (!b) {
+        setBookmarked(new Set());
+        return;
+      }
+      setBookmarked(
+        new Set(
+          getBookmarks(b.id)
+            .filter((bm) => bm.chapterIndex === currentChapter)
+            .map((bm) => bm.paragraphIndex ?? 0),
+        ),
+      );
+    }, [currentChapter]),
+  );
+
   // Toggle background music on/off, choosing a loop from the book's AI tags
   // (falls back to a neutral default when the book has no tags yet).
   const toggleMusic = useCallback(() => {
@@ -186,16 +205,8 @@ export default function ReaderScreen() {
 
   // Read-aloud play/pause. Chapter orchestration + auto-advance live in the
   // screen-independent playback session so they keep running in the background.
+  // (The seekable progress bar lives in the app-wide AudioPlayerBar.)
   const toggleTts = useCallback(() => playback.togglePlayback(), []);
-
-  // Jump read-aloud to a paragraph in the current chapter (progress-bar seek).
-  const seekTts = useCallback(
-    (para: number) => {
-      const clamped = Math.max(0, Math.min(para, paragraphs.length - 1));
-      playback.startChapter(currentChapter, clamped);
-    },
-    [paragraphs.length, currentChapter],
-  );
 
   // Follow the paragraph being read: scroll it into view as TTS advances.
   useEffect(() => {
@@ -277,6 +288,7 @@ export default function ReaderScreen() {
         scrollY: paraOffsets.current[index] ?? scrollY.current,
         highlight: excerpt,
       });
+      setBookmarked((prev) => new Set(prev).add(index));
       Alert.alert(
         "Bookmarked",
         excerpt ? `“${excerpt.slice(0, 80)}${excerpt.length > 80 ? "…" : ""}”` : `Chapter ${currentChapter + 1}`,
@@ -369,7 +381,10 @@ export default function ReaderScreen() {
             onLongPress={() => bookmarkParagraph(i)}
             delayLongPress={350}
             onLayout={(e) => onParaLayout(i, e.nativeEvent.layout.y)}
-            style={i === ttsSegment ? { backgroundColor: highlightBg, borderRadius: 6 } : undefined}>
+            style={[
+              bookmarked.has(i) && [styles.bookmarkedPara, { borderLeftColor: colors.muted }],
+              i === ttsSegment && { backgroundColor: highlightBg, borderRadius: 6 },
+            ]}>
             <ParagraphBody
               text={p}
               style={paraStyle}
@@ -410,15 +425,6 @@ export default function ReaderScreen() {
         />
       )}
 
-      {ttsActive && (
-        <TtsProgress
-          current={ttsSegment}
-          total={ttsTotalSegments}
-          colors={colors}
-          onSeek={seekTts}
-        />
-      )}
-
       <View style={[styles.nav, { borderTopColor: colors.muted }]}>
         <Pressable
           onPress={() => goToChapter(currentChapter - 1)}
@@ -439,58 +445,6 @@ export default function ReaderScreen() {
         </Pressable>
       </View>
     </SafeAreaView>
-  );
-}
-
-/**
- * Seekable read-aloud progress bar (by paragraph). Tap or drag anywhere on the
- * track to jump TTS to that paragraph. Shows a live preview while dragging and
- * only commits the seek on release (restarting TTS mid-drag would be choppy).
- */
-function TtsProgress({
-  current,
-  total,
-  colors,
-  onSeek,
-}: {
-  current: number;
-  total: number;
-  colors: { text: string; muted: string; background: string };
-  onSeek: (para: number) => void;
-}) {
-  const widthRef = useRef(0);
-  const [drag, setDrag] = useState<number | null>(null);
-
-  const fracFromX = (x: number) => {
-    const w = widthRef.current || 1;
-    return Math.max(0, Math.min(1, x / w));
-  };
-  const frac = drag ?? (total > 0 ? (Math.max(0, current) + 1) / total : 0);
-  const shownPara = drag != null && total > 0 ? Math.round(drag * (total - 1)) : Math.max(0, current);
-
-  return (
-    <View style={[styles.progressWrap, { borderTopColor: colors.muted }]}>
-      <View
-        style={styles.progressTouch}
-        onLayout={(e: LayoutChangeEvent) => (widthRef.current = e.nativeEvent.layout.width)}
-        onStartShouldSetResponder={() => true}
-        onMoveShouldSetResponder={() => true}
-        onResponderGrant={(e: GestureResponderEvent) => setDrag(fracFromX(e.nativeEvent.locationX))}
-        onResponderMove={(e: GestureResponderEvent) => setDrag(fracFromX(e.nativeEvent.locationX))}
-        onResponderRelease={(e: GestureResponderEvent) => {
-          const f = fracFromX(e.nativeEvent.locationX);
-          setDrag(null);
-          if (total > 0) onSeek(Math.round(f * (total - 1)));
-        }}
-        onResponderTerminate={() => setDrag(null)}>
-        <View style={[styles.progressTrack, { backgroundColor: colors.muted }]}>
-          <View style={[styles.progressFill, { backgroundColor: colors.text, width: `${frac * 100}%` }]} />
-        </View>
-      </View>
-      <Text style={[styles.progressLabel, { color: colors.muted }]}>
-        ¶ {shownPara + 1} / {total || 1}
-      </Text>
-    </View>
   );
 }
 
@@ -643,18 +597,7 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
   },
   navText: { fontSize: 13, fontWeight: "500" },
-  progressWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 20,
-    paddingTop: 6,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  progressTouch: { flex: 1, height: 28, justifyContent: "center" },
-  progressTrack: { height: 4, borderRadius: 2, overflow: "hidden", opacity: 0.5 },
-  progressFill: { height: 4, borderRadius: 2 },
-  progressLabel: { fontSize: 12, fontWeight: "500", minWidth: 56, textAlign: "right" },
+  bookmarkedPara: { borderLeftWidth: 3, paddingLeft: 9, marginLeft: -12 },
   defineHint: { fontSize: 13, fontWeight: "600", marginBottom: 12 },
   defineWord: { textDecorationLine: "underline", textDecorationStyle: "dotted" },
   defineWordSelected: { backgroundColor: "rgba(230,126,34,0.3)" },

@@ -450,7 +450,7 @@ export function clearSeriesKB(seriesId: string): void {
 // KB analysis checkpoint (resume a whole-book pass across pauses / app close)
 // ---------------------------------------------------------------------------
 
-export type KBAnalysisStatus = "running" | "paused" | "error" | "done";
+export type KBAnalysisStatus = "running" | "paused" | "error" | "done" | "cancelled";
 
 export interface KBAnalysisState {
   seriesId: string;
@@ -490,7 +490,11 @@ export function clearAnalysisState(seriesId: string): void {
   db.runSync("DELETE FROM kb_analysis WHERE seriesId = ?", [seriesId]);
 }
 
-/** Any analysis left mid-flight (running/paused) — used to offer resume on launch. */
+/**
+ * Any analysis left mid-flight (running/paused) — used to offer resume on launch.
+ * Explicitly-cancelled runs are excluded: they stay resumable from the book
+ * detail screen but must not resurface the progress banner on their own.
+ */
 export function getInterruptedAnalysis(): KBAnalysisState | null {
   return (
     db.getFirstSync<KBAnalysisState>(
