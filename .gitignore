@@ -47,4 +47,5 @@ app-example
 /ios
 /android
 
-modules/
+# custom native modules: track source, ignore build output
+modules/*/android/build/
