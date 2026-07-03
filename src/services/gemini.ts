@@ -64,6 +64,28 @@ export const ALLOWED_TAGS = [
 
 export type BookTag = (typeof ALLOWED_TAGS)[number];
 
+/**
+ * Vietnamese display labels for tags. The stored tag keys stay English because
+ * they double as MUSIC_MAP keys (see ALLOWED_TAGS) — this map is display-only,
+ * so the UI can show localized genre/mood names without touching the key space.
+ */
+export const TAG_LABELS_VI: Record<BookTag, string> = {
+  action: "Hành động",
+  romance: "Lãng mạn",
+  mystery: "Bí ẩn",
+  fantasy: "Kỳ ảo",
+  scifi: "Khoa học viễn tưởng",
+  comedy: "Hài hước",
+  sad: "Bi thương",
+  horror: "Kinh dị",
+  adventure: "Phiêu lưu",
+  cultivation: "Tu luyện",
+  wuxia: "Võ hiệp",
+  xianxia: "Tiên hiệp",
+  thriller: "Giật gân",
+  "slice-of-life": "Đời thường",
+};
+
 /** Raised for any Gemini call failure so callers can show a clean message. */
 export class GeminiError extends Error {
   constructor(message: string, readonly cause?: unknown) {

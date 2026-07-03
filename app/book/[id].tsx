@@ -8,7 +8,15 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useBookAI, type AIFeature } from "@/src/hooks/useBookAI";
 import { useSeriesKB } from "@/src/hooks/useSeriesKB";
 import { cancelAnalysis } from "@/src/services/kbRunner";
-import { getBook, getChapters, type Character, type PowerStage } from "@/src/services/db";
+import {
+  getBook,
+  getChapters,
+  getCharacterEvents,
+  type Character,
+  type CharacterEvent,
+  type PowerStage,
+} from "@/src/services/db";
+import { TAG_LABELS_VI } from "@/src/services/gemini";
 import { useBookStore } from "@/src/store/bookStore";
 import { THEMES, useSettingsStore } from "@/src/store/settingsStore";
 
@@ -36,14 +44,14 @@ export default function BookDetailScreen() {
   if (!book) {
     return (
       <SafeAreaView style={[styles.container, styles.center, { backgroundColor: colors.background }]}>
-        <Text style={{ color: colors.muted }}>Book not found.</Text>
+        <Text style={{ color: colors.muted }}>Không tìm thấy sách.</Text>
       </SafeAreaView>
     );
   }
 
   const titles = book.chapterTitles?.length
     ? book.chapterTitles
-    : Array.from({ length: book.totalChapters ?? 0 }, (_, i) => `Chapter ${i + 1}`);
+    : Array.from({ length: book.totalChapters ?? 0 }, (_, i) => `Chương ${i + 1}`);
   const resumeChapter = book.lastPosition?.chapterIndex ?? 0;
   const hasProgress = resumeChapter > 0 || (book.lastPosition?.scrollY ?? 0) > 0;
   const kbRunning = kb.status === "running";
@@ -83,7 +91,7 @@ export default function BookDetailScreen() {
               <Text style={[styles.author, { color: colors.muted }]}>{book.author}</Text>
             )}
             <Text style={[styles.meta, { color: colors.muted }]}>
-              {(book.format || "book").toUpperCase()} · {titles.length} chapters
+              {(book.format || "book").toUpperCase()} · {titles.length} chương
             </Text>
           </View>
         </View>
@@ -95,7 +103,7 @@ export default function BookDetailScreen() {
             style={[styles.primaryBtn, { backgroundColor: colors.text }]}>
             <Ionicons name="book" size={18} color={colors.background} />
             <Text style={[styles.primaryText, { color: colors.background }]}>
-              {hasProgress ? `Continue · Ch. ${resumeChapter + 1}` : "Start reading"}
+              {hasProgress ? `Đọc tiếp · Chương ${resumeChapter + 1}` : "Bắt đầu đọc"}
             </Text>
           </Pressable>
           <Pressable
@@ -112,17 +120,17 @@ export default function BookDetailScreen() {
 
         {/* Tags (AI auto-tagging) */}
         <AISection
-          title="Tags"
+          title="Thể loại"
           feature={ai.tags}
           colors={colors}
           isEmpty={(t) => t.length === 0}
-          emptyHint="No tags yet — analyze to auto-tag genre & mood (also picks background music)."
-          noun="tags">
+          emptyHint="Chưa có thể loại — phân tích để tự gắn thể loại & tâm trạng (đồng thời chọn nhạc nền)."
+          noun="thể loại">
           {(tags) => (
             <View style={styles.tagRow}>
               {tags.map((t) => (
                 <View key={t} style={[styles.tag, { borderColor: colors.muted }]}>
-                  <Text style={{ color: colors.text, fontSize: 13 }}>{t}</Text>
+                  <Text style={{ color: colors.text, fontSize: 13 }}>{TAG_LABELS_VI[t] ?? t}</Text>
                 </View>
               ))}
             </View>
@@ -130,22 +138,22 @@ export default function BookDetailScreen() {
         </AISection>
 
         <AISection
-          title="Story summary"
+          title="Tóm tắt truyện"
           feature={ai.summary}
           colors={colors}
           isEmpty={(s) => s.trim().length === 0}
-          emptyHint="No summary yet — analyze the story so far."
-          noun="summary"
+          emptyHint="Chưa có tóm tắt — phân tích cốt truyện đến hiện tại."
+          noun="tóm tắt"
           collapsible
           initialCollapsed>
           {(text) => <Text style={[styles.bodyText, { color: colors.text }]}>{text}</Text>}
         </AISection>
 
         {/* Whole-book analysis → knowledge base (power system + characters + lore) */}
-        <Section title="Story analysis" colors={colors}>
+        <Section title="Phân tích truyện" colors={colors}>
           <Text style={[styles.placeholder, { color: colors.muted }]}>
-            Reads the entire book to extract a detailed power system and character profiles. Runs in
-            the background — you can keep reading — and is cached after the first run.
+            Đọc toàn bộ truyện để trích xuất hệ thống sức mạnh và hồ sơ nhân vật chi tiết. Chạy nền —
+            bạn vẫn có thể đọc tiếp — và được lưu cache sau lần chạy đầu.
           </Text>
 
           {kbRunning ? (
@@ -153,11 +161,11 @@ export default function BookDetailScreen() {
               <ActivityIndicator size="small" color={colors.text} />
               <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600", flex: 1 }}>
                 {kb.progress
-                  ? `Analyzing… chunk ${kb.progress.current + 1}/${kb.progress.total}`
-                  : "Analyzing…"}
+                  ? `Đang phân tích… phần ${kb.progress.current + 1}/${kb.progress.total}`
+                  : "Đang phân tích…"}
               </Text>
               <Pressable onPress={cancelAnalysis} hitSlop={8}>
-                <Text style={{ color: colors.muted, fontSize: 13, fontWeight: "600" }}>Cancel</Text>
+                <Text style={{ color: colors.muted, fontSize: 13, fontWeight: "600" }}>Huỷ</Text>
               </Pressable>
             </View>
           ) : kbPaused ? (
@@ -166,7 +174,7 @@ export default function BookDetailScreen() {
               style={[styles.aiBtn, styles.aiBtnInline, { borderColor: colors.muted }]}>
               <Ionicons name="play" size={16} color={colors.text} />
               <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
-                Resume analysis
+                Tiếp tục phân tích
               </Text>
             </Pressable>
           ) : (
@@ -175,7 +183,7 @@ export default function BookDetailScreen() {
               style={[styles.aiBtn, styles.aiBtnInline, { borderColor: colors.muted }]}>
               <Ionicons name="sparkles-outline" size={16} color={colors.text} />
               <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
-                {kbHasData ? "Re-analyze full book" : "Analyze full book"}
+                {kbHasData ? "Phân tích lại toàn bộ" : "Phân tích toàn bộ truyện"}
               </Text>
             </Pressable>
           )}
@@ -188,7 +196,7 @@ export default function BookDetailScreen() {
           )}
         </Section>
 
-        <Section title="Power system" colors={colors} collapsible initialCollapsed>
+        <Section title="Hệ thống sức mạnh" colors={colors} collapsible initialCollapsed>
           {kb.kb.powerStages.length > 0 ? (
             <View style={{ gap: 10 }}>
               {kb.kb.powerStages.map((s) => (
@@ -197,13 +205,13 @@ export default function BookDetailScreen() {
             </View>
           ) : (
             <Text style={[styles.placeholder, { color: colors.muted }]}>
-              No power system extracted yet — run the analysis above.
+              Chưa trích xuất hệ thống sức mạnh — hãy chạy phân tích ở trên.
             </Text>
           )}
         </Section>
 
         <Section
-          title={`Character profiles${kb.kb.characters.length ? ` (${kb.kb.characters.length})` : ""}`}
+          title={`Hồ sơ nhân vật${kb.kb.characters.length ? ` (${kb.kb.characters.length})` : ""}`}
           colors={colors}
           collapsible
           initialCollapsed>
@@ -215,13 +223,13 @@ export default function BookDetailScreen() {
             </View>
           ) : (
             <Text style={[styles.placeholder, { color: colors.muted }]}>
-              No characters extracted yet — run the analysis above.
+              Chưa trích xuất nhân vật nào — hãy chạy phân tích ở trên.
             </Text>
           )}
         </Section>
 
         {/* Chapter index (real) */}
-        <Section title={`Chapters (${titles.length})`} colors={colors} collapsible initialCollapsed>
+        <Section title={`Danh sách chương (${titles.length})`} colors={colors} collapsible initialCollapsed>
           {titles.map((t, i) => (
             <Pressable
               key={i}
@@ -337,7 +345,7 @@ function AISection<T>({
           <Ionicons name="sparkles-outline" size={16} color={colors.text} />
         )}
         <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
-          {loading ? "Analyzing…" : has ? `Re-generate ${noun}` : `Generate ${noun} with AI`}
+          {loading ? "Đang phân tích…" : has ? `Tạo lại ${noun}` : `Tạo ${noun} bằng AI`}
         </Text>
       </Pressable>
 
@@ -357,24 +365,69 @@ function PowerStageRow({ stage, colors }: { stage: PowerStage; colors: SectionCo
   );
 }
 
+/** Vietnamese display labels for the model's English role values. */
+const ROLE_LABELS_VI: Record<string, string> = {
+  protagonist: "Nhân vật chính",
+  antagonist: "Phản diện",
+  supporting: "Nhân vật phụ",
+};
+
 /** Labeled character profile (Name / Gender / Power / …) from the series KB. */
 function CharacterCard({ character, colors }: { character: Character; colors: SectionColors }) {
   const c = character;
+  // Reload the life-history events whenever this character advances in the book.
+  const events = useMemo(
+    () => getCharacterEvents(c.id),
+    [c.id, c.lastSeenVolume, c.lastSeenChapter],
+  );
+
+  // Relationships: "relation" is stored from THIS character's point of view — it
+  // states what the named person is TO this character (see deltaExtractor prompt),
+  // so "B (vợ)" on A's card means B is A's wife.
   const rels = c.relationships.map((r) => `${r.name} (${r.relation})`).join(", ");
+  // Merge Strengths (current realm/power) and Skills into one field — they
+  // overlap heavily in practice, so a single line reads cleaner.
+  const powerAndSkills = [c.currentPower, c.skills.join(", ")].filter(Boolean).join(" · ");
+  const role = c.role ? (ROLE_LABELS_VI[c.role.toLowerCase()] ?? c.role) : undefined;
+
   return (
     <View style={[styles.charCard, { borderColor: colors.muted }]}>
       <Text style={[styles.charName, { color: colors.text }]}>{c.name}</Text>
       <Field label="Giới tính" value={c.gender} colors={colors} />
-      <Field label="Vai trò" value={c.role} colors={colors} />
-      <Field label="Sức mạnh" value={c.currentPower} colors={colors} />
+      <Field label="Vai trò" value={role} colors={colors} />
+      <Field label="Sức mạnh & kỹ năng" value={powerAndSkills} colors={colors} />
       <Field label="Thế lực" value={c.faction} colors={colors} />
       <Field label="Biệt danh" value={c.aliases.join(", ")} colors={colors} />
-      <Field label="Kỹ năng" value={c.skills.join(", ")} colors={colors} />
       <Field label="Quan hệ" value={rels} colors={colors} />
       <Field label="Tính cách" value={c.personality} colors={colors} />
       <Field label="Trạng thái" value={c.status} colors={colors} />
       <Field label="Ngoại hình" value={c.appearance} colors={colors} />
       <Field label="Lai lịch" value={c.backstory} colors={colors} />
+      <LifeHistory events={events} colors={colors} />
+    </View>
+  );
+}
+
+/**
+ * Character life history: the full append-only event log in chronological order
+ * (getCharacterEvents already sorts by volume then chapter), not just the latest
+ * overwritten backstory.
+ */
+function LifeHistory({ events, colors }: { events: CharacterEvent[]; colors: SectionColors }) {
+  const visible = events.filter((e) => e.description.trim().length > 0);
+  if (visible.length === 0) return null;
+  return (
+    <View style={styles.timeline}>
+      <Text style={[styles.charLine, { color: colors.muted, fontWeight: "600" }]}>Tiểu sử:</Text>
+      {visible.map((e) => (
+        <Text key={e.id} style={[styles.timelineItem, { color: colors.text }]}>
+          {"• "}
+          {e.chapter > 0 && (
+            <Text style={{ color: colors.muted }}>{`Chương ${e.chapter + 1}: `}</Text>
+          )}
+          {e.description}
+        </Text>
+      ))}
     </View>
   );
 }
@@ -432,6 +485,8 @@ const styles = StyleSheet.create({
   charCard: { borderWidth: 1, borderRadius: 10, padding: 12, gap: 4 },
   charName: { fontSize: 16, fontWeight: "700", marginBottom: 2 },
   charLine: { fontSize: 13, lineHeight: 19 },
+  timeline: { marginTop: 4, gap: 3 },
+  timelineItem: { fontSize: 13, lineHeight: 19, paddingLeft: 4 },
   psRow: { gap: 2 },
   psName: { fontSize: 15, fontWeight: "600" },
   tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },

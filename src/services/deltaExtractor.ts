@@ -190,7 +190,7 @@ Return ONLY valid JSON (no markdown, no prose) in exactly this shape:
       "backstory": "lai lịch / diễn biến quan trọng (có thể spoiler)",
       "status": "còn sống | đã chết | không rõ",
       "newSkills": ["kỹ năng / công pháp mới"],
-      "newRelationships": [{ "name": "tên", "relation": "quan hệ" }],
+      "newRelationships": [{ "name": "tên người liên quan", "relation": "người đó LÀ GÌ của nhân vật này" }],
       "event": "điều xảy ra với nhân vật trong đoạn này",
       "eventType": "power_up | relationship | death | reveal | other"
     }
@@ -205,6 +205,11 @@ Rules:
   (matching by name OR any alias), REUSE that exact existing "name" — do not create a variant.
 - "role": the character's importance to the plot — "protagonist" (main), "antagonist", or
   "supporting" (minor/side).
+- "newRelationships": ALWAYS record each relation from THIS character's point of view — the
+  "relation" states what the NAMED person is TO this character. Example: in nhân vật A's list,
+  { "name": "B", "relation": "vợ" } means B is A's wife; the reciprocal entry in nhân vật B's
+  list is { "name": "A", "relation": "chồng" } (A is B's husband). Never store the relation from
+  the other person's perspective.
 - Use "" / [] / null for anything the text does not reveal — never invent.
 - All Vietnamese text; keep proper nouns (Hán Việt) intact.
 - If there is genuinely nothing new, return { "hasChanges": false }.
