@@ -1,16 +1,38 @@
 /**
- * Character profile screen (Phase 5 Step B): the accumulated current state of
- * one character from the series knowledge base, plus their full life-history
- * timeline (`character_events`, chronological across volumes).
+ * Character profile screen (Phase 5 Step B + Phase 6 art): accumulated current
+ * state from the series knowledge base, an AI portrait (Pollinations, cached
+ * forever in `characters.imageUrl`), the life-history timeline, and a stage
+ * gallery — one portrait per `appearance_change` event (life stage /
+ * transformation), all sharing the character's seed for face consistency.
  */
 import { Ionicons } from "@expo/vector-icons";
+import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useMemo } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useCallback, useMemo, useState } from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { Field, LifeHistory, roleLabel } from "@/src/components/CharacterProfile";
-import { getCharacter, getCharacterEvents, getSeries } from "@/src/services/db";
+import {
+  getBooksInSeries,
+  getCharacter,
+  getCharacterEvents,
+  getSeries,
+  updateCharacterEventImage,
+  updateCharacterImage,
+  type CharacterEvent,
+} from "@/src/services/db";
+import {
+  generateCharacterPortraitUrl,
+  generateStagePortraitUrl,
+} from "@/src/services/imageAI";
 import { THEMES, useSettingsStore } from "@/src/store/settingsStore";
 
 export default function CharacterScreen() {
@@ -18,11 +40,50 @@ export default function CharacterScreen() {
   const router = useRouter();
   const colors = THEMES[useSettingsStore((s) => s.theme)];
 
-  const character = useMemo(() => (id ? getCharacter(id) : null), [id]);
-  const events = useMemo(() => (id ? getCharacterEvents(id) : []), [id]);
+  // refresh bumps re-read the DB after an image URL is persisted.
+  const [refresh, setRefresh] = useState(0);
+  const bump = useCallback(() => setRefresh((n) => n + 1), []);
+
+  const character = useMemo(() => (id ? getCharacter(id) : null), [id, refresh]); // eslint-disable-line react-hooks/exhaustive-deps
+  const events = useMemo(() => (id ? getCharacterEvents(id) : []), [id, refresh]); // eslint-disable-line react-hooks/exhaustive-deps
   const seriesName = useMemo(
     () => (character ? getSeries(character.seriesId)?.name : undefined),
     [character],
+  );
+  // Art style follows the series' first volume's first tag (STYLE_MAP).
+  const styleTag = useMemo(
+    () => (character ? getBooksInSeries(character.seriesId)[0]?.tags[0] : undefined),
+    [character],
+  );
+
+  const [portraitBusy, setPortraitBusy] = useState(false);
+  const [stageBusy, setStageBusy] = useState<string | null>(null);
+
+  const makePortrait = useCallback(async () => {
+    if (!character || portraitBusy) return;
+    setPortraitBusy(true);
+    try {
+      const url = await generateCharacterPortraitUrl(character, styleTag);
+      updateCharacterImage(character.id, url);
+      bump();
+    } finally {
+      setPortraitBusy(false);
+    }
+  }, [character, styleTag, portraitBusy, bump]);
+
+  const makeStagePortrait = useCallback(
+    async (event: CharacterEvent) => {
+      if (!character || stageBusy) return;
+      setStageBusy(event.id);
+      try {
+        const url = await generateStagePortraitUrl(character, event, styleTag);
+        updateCharacterEventImage(event.id, url);
+        bump();
+      } finally {
+        setStageBusy(null);
+      }
+    },
+    [character, styleTag, stageBusy, bump],
   );
 
   if (!character) {
@@ -37,6 +98,9 @@ export default function CharacterScreen() {
   const c = character;
   const rels = c.relationships.map((r) => `${r.name} (${r.relation})`).join(", ");
   const powerAndSkills = [c.currentPower, c.skills.join(", ")].filter(Boolean).join(" · ");
+  const stages = events.filter(
+    (e) => e.eventType === "appearance_change" && e.description.trim().length > 0,
+  );
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
@@ -47,11 +111,37 @@ export default function CharacterScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={[styles.name, { color: colors.text }]}>{c.name}</Text>
-        {!!seriesName && (
-          <Text style={[styles.series, { color: colors.muted }]}>{seriesName}</Text>
-        )}
+        {/* Header: portrait + name */}
+        <View style={styles.header}>
+          <View style={[styles.portrait, { backgroundColor: colors.muted }]}>
+            {c.imageUrl ? (
+              <Image source={{ uri: c.imageUrl }} style={styles.portraitImg} contentFit="cover" transition={200} />
+            ) : (
+              <Ionicons name="person-outline" size={36} color="#fff" style={{ opacity: 0.7 }} />
+            )}
+          </View>
+          <View style={styles.headerInfo}>
+            <Text style={[styles.name, { color: colors.text }]}>{c.name}</Text>
+            {!!seriesName && (
+              <Text style={[styles.series, { color: colors.muted }]}>{seriesName}</Text>
+            )}
+            <Pressable
+              onPress={makePortrait}
+              disabled={portraitBusy}
+              style={[styles.aiBtn, { borderColor: colors.muted, opacity: portraitBusy ? 0.6 : 1 }]}>
+              {portraitBusy ? (
+                <ActivityIndicator size="small" color={colors.text} />
+              ) : (
+                <Ionicons name="color-palette-outline" size={15} color={colors.text} />
+              )}
+              <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                {c.imageUrl ? "Tạo lại chân dung" : "Tạo chân dung AI"}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
 
+        {/* Profile fields */}
         <View style={[styles.card, { borderColor: colors.muted, marginTop: 16 }]}>
           <Field label="Giới tính" value={c.gender} colors={colors} />
           <Field label="Vai trò" value={roleLabel(c.role)} colors={colors} />
@@ -65,6 +155,47 @@ export default function CharacterScreen() {
           <Field label="Lai lịch" value={c.backstory} colors={colors} />
         </View>
 
+        {/* Stage gallery — one portrait per fundamental appearance change */}
+        {stages.length > 0 && (
+          <View style={{ marginTop: 20 }}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Qua các giai đoạn</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={styles.stageRow}>
+                {stages.map((e) => (
+                  <View key={e.id} style={[styles.stageCard, { borderColor: colors.muted }]}>
+                    <View style={[styles.stageImgWrap, { backgroundColor: colors.muted }]}>
+                      {e.imageUrl ? (
+                        <Image source={{ uri: e.imageUrl }} style={styles.portraitImg} contentFit="cover" transition={200} />
+                      ) : (
+                        <Pressable
+                          onPress={() => makeStagePortrait(e)}
+                          disabled={stageBusy !== null}
+                          style={styles.stageGenBtn}>
+                          {stageBusy === e.id ? (
+                            <ActivityIndicator size="small" color="#fff" />
+                          ) : (
+                            <Ionicons name="color-palette-outline" size={22} color="#fff" />
+                          )}
+                          <Text style={styles.stageGenText}>Tạo ảnh</Text>
+                        </Pressable>
+                      )}
+                    </View>
+                    <Text style={[styles.stageMeta, { color: colors.muted }]}>
+                      {e.volume > 0 ? `Tập ${e.volume} · ` : ""}Chương {e.chapter + 1}
+                    </Text>
+                    <Text
+                      style={[styles.stageDesc, { color: colors.text }]}
+                      numberOfLines={3}>
+                      {e.description}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
+          </View>
+        )}
+
+        {/* Life history timeline */}
         <View style={[styles.card, { borderColor: colors.muted, marginTop: 16 }]}>
           {events.some((e) => e.description.trim().length > 0) ? (
             <LifeHistory events={events} colors={colors} />
@@ -84,8 +215,51 @@ const styles = StyleSheet.create({
   center: { alignItems: "center", justifyContent: "center" },
   topBar: { paddingHorizontal: 16, paddingBottom: 4 },
   content: { padding: 20, paddingBottom: 48 },
+  header: { flexDirection: "row", gap: 14 },
+  portrait: {
+    width: 96,
+    aspectRatio: 2 / 3,
+    borderRadius: 10,
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  portraitImg: { width: "100%", height: "100%" },
+  headerInfo: { flex: 1, justifyContent: "center", gap: 4 },
   name: { fontSize: 24, fontWeight: "700" },
-  series: { fontSize: 14, marginTop: 2 },
+  series: { fontSize: 14 },
+  aiBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    marginTop: 6,
+  },
   card: { borderWidth: 1, borderRadius: 10, padding: 14, gap: 4 },
   placeholder: { fontSize: 14, fontStyle: "italic", lineHeight: 20 },
+  sectionTitle: {
+    fontSize: 13,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 10,
+  },
+  stageRow: { flexDirection: "row", gap: 12 },
+  stageCard: { width: 130, borderWidth: 1, borderRadius: 10, padding: 8, gap: 4 },
+  stageImgWrap: {
+    width: "100%",
+    aspectRatio: 2 / 3,
+    borderRadius: 6,
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stageGenBtn: { alignItems: "center", justifyContent: "center", gap: 4, flex: 1, alignSelf: "stretch" },
+  stageGenText: { color: "#fff", fontSize: 12, fontWeight: "600" },
+  stageMeta: { fontSize: 11 },
+  stageDesc: { fontSize: 12, lineHeight: 16 },
 });
