@@ -14,8 +14,18 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { SeriesAssignModal } from "@/src/components/SeriesAssignModal";
 import { deleteBook, getAllBooks, type Book } from "@/src/services/db";
-import { ImportError, importBook } from "@/src/services/import";
+import { isGeminiConfigured } from "@/src/services/gemini";
+import {
+  ImportError,
+  commitImport,
+  discardStagedImport,
+  pickAndParseBook,
+  type SeriesAssignment,
+  type StagedImport,
+} from "@/src/services/import";
+import { analyzeBook } from "@/src/services/kbRunner";
 import { THEMES, useSettingsStore } from "@/src/store/settingsStore";
 
 export default function LibraryScreen() {
@@ -25,6 +35,7 @@ export default function LibraryScreen() {
 
   const [books, setBooks] = useState<Book[]>([]);
   const [importing, setImporting] = useState(false);
+  const [staged, setStaged] = useState<StagedImport | null>(null);
   const [filter, setFilter] = useState("");
 
   const reload = useCallback(() => setBooks(getAllBooks()), []);
@@ -41,11 +52,13 @@ export default function LibraryScreen() {
     );
   }, [books, filter]);
 
+  // Phase 1 of import: pick + parse. The series-assign modal then decides
+  // whether/what to commit (phase 2 in onAssign below).
   const onImport = useCallback(async () => {
     setImporting(true);
     try {
-      const bookId = await importBook();
-      if (bookId) reload();
+      const parsed = await pickAndParseBook();
+      if (parsed) setStaged(parsed);
     } catch (err) {
       const msg =
         err instanceof ImportError ? err.message : "Something went wrong importing.";
@@ -53,7 +66,34 @@ export default function LibraryScreen() {
     } finally {
       setImporting(false);
     }
-  }, [reload]);
+  }, []);
+
+  const onAssign = useCallback(
+    (assignment: SeriesAssignment) => {
+      if (!staged) return;
+      const bookId = commitImport(staged, assignment);
+      setStaged(null);
+      reload();
+      // Whole-book KB analysis is a manual quota spend — offer, don't force.
+      // It runs in the background (kbRunner banner) while the user reads.
+      if (isGeminiConfigured()) {
+        Alert.alert(
+          "Analyze this book now?",
+          "Builds the power system + character knowledge base with Gemini. Runs in the background — you can keep reading.",
+          [
+            { text: "Later", style: "cancel" },
+            { text: "Analyze", onPress: () => analyzeBook(bookId, { fresh: false }) },
+          ],
+        );
+      }
+    },
+    [staged, reload],
+  );
+
+  const onCancelAssign = useCallback(() => {
+    if (staged) discardStagedImport(staged);
+    setStaged(null);
+  }, [staged]);
 
   const openBook = useCallback(
     (book: Book) => {
@@ -168,6 +208,8 @@ export default function LibraryScreen() {
           </Pressable>
         )}
       />
+
+      <SeriesAssignModal staged={staged} onConfirm={onAssign} onCancel={onCancelAssign} />
     </SafeAreaView>
   );
 }

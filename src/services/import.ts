@@ -1,32 +1,25 @@
 /**
  * Import pipeline: pick a file → copy into app storage → parse → persist.
  *
- * Flow:
- *   1. DocumentPicker picks an epub/pdf/docx (copied to cache).
- *   2. We copy it into the document directory so it survives cache eviction —
- *      the reader streams chapters from the parsed text, but we keep the
- *      original file for re-parsing / future features.
- *   3. Dispatch to the format parser → ParsedBook (plain-text chapters).
- *   4. saveBook + a standalone 1-volume series (the unified data model) +
- *      index every chapter into FTS5 for search.
- *
- * Returns the new bookId, or null if the user cancelled.
+ * Two-phase so the UI can ask the series question in between (Phase 5 Step B):
+ *   1. `pickAndParseBook()` — DocumentPicker picks an epub/pdf/docx, we copy it
+ *      into documents/books/ (survives cache eviction; kept for re-parsing),
+ *      parse to plain-text chapters, strip scraper boilerplate. Returns a
+ *      staged import (nothing in the DB yet), or null if the user cancelled.
+ *   2. UI shows the series-assign choice (standalone / new series / add to
+ *      existing as volume N).
+ *   3. `commitImport(staged, assignment)` — saveBook + series link + FTS index.
+ *      Or `discardStagedImport(staged)` if the user backs out.
  */
 import * as DocumentPicker from "expo-document-picker";
 import { Directory, File, Paths } from "expo-file-system";
 
-import {
-  indexChapter,
-  insertBookSeries,
-  insertSeries,
-  saveBook,
-  updateSeriesVolumeCount,
-  type BookFormat,
-} from "./db";
+import { indexChapter, saveBook, type BookFormat } from "./db";
 import { parseDocx } from "./docx";
 import { parseEpub } from "./epub";
 import { ParseError, type ParsedBook } from "./parseTypes";
 import { parsePdf } from "./pdf";
+import { assignBookToSeries, createSeries } from "./seriesManager";
 import { cleanBoilerplate } from "../utils/clean";
 
 const ACCEPTED_MIME = [
@@ -66,7 +59,24 @@ export class ImportError extends Error {
   }
 }
 
-export async function importBook(): Promise<string | null> {
+/** A parsed book copied into app storage but not yet saved to the DB. */
+export interface StagedImport {
+  fileUri: string;
+  title: string;
+  author?: string;
+  format: BookFormat;
+  coverDataUri?: string;
+  chapterTitles: string[];
+  /** Cleaned plain-text chapter bodies, parallel to chapterTitles. */
+  chapters: string[];
+}
+
+export type SeriesAssignment =
+  | { kind: "standalone" }
+  | { kind: "new"; name: string; volumeNumber: number }
+  | { kind: "existing"; seriesId: string; volumeNumber: number };
+
+export async function pickAndParseBook(): Promise<StagedImport | null> {
   const result = await DocumentPicker.getDocumentAsync({
     type: ACCEPTED_MIME,
     copyToCacheDirectory: true,
@@ -109,24 +119,61 @@ export async function importBook(): Promise<string | null> {
   // Strip repeated headers/footers + ad lines injected by scraper sites.
   const cleanedContent = cleanBoilerplate(parsed.chapters.map((c) => c.content));
 
-  // Persist book.
-  const bookId = saveBook({
+  return {
+    fileUri: destFile.uri,
     title,
     author: parsed.author,
-    filePath: destFile.uri,
     format: parsed.format,
-    coverUrl: parsed.coverDataUri,
+    coverDataUri: parsed.coverDataUri,
     chapterTitles: parsed.chapters.map((c) => c.title),
-    totalChapters: parsed.chapters.length,
+    chapters: cleanedContent,
+  };
+}
+
+/** Delete the staged copy when the user backs out of the series dialog. */
+export function discardStagedImport(staged: StagedImport): void {
+  try {
+    new File(staged.fileUri).delete();
+  } catch {
+    /* best effort */
+  }
+}
+
+/** Persist a staged import: book row, series link, FTS index. Returns bookId. */
+export function commitImport(
+  staged: StagedImport,
+  assignment: SeriesAssignment,
+): string {
+  const bookId = saveBook({
+    title: staged.title,
+    author: staged.author,
+    filePath: staged.fileUri,
+    format: staged.format,
+    coverUrl: staged.coverDataUri,
+    chapterTitles: staged.chapterTitles,
+    totalChapters: staged.chapters.length,
   });
 
-  // Every book is a 1-volume standalone series (unified KB model, see db.ts).
-  const seriesId = insertSeries(title);
-  insertBookSeries(bookId, seriesId, 1);
-  updateSeriesVolumeCount(seriesId, 1);
+  // Every book lives in a series (unified KB model, see db.ts) — standalone
+  // just means a fresh 1-volume series named after the book.
+  switch (assignment.kind) {
+    case "standalone":
+      assignBookToSeries(bookId, createSeries(staged.title), 1);
+      break;
+    case "new":
+      assignBookToSeries(
+        bookId,
+        createSeries(assignment.name || staged.title),
+        assignment.volumeNumber,
+      );
+      break;
+    case "existing":
+      assignBookToSeries(bookId, assignment.seriesId, assignment.volumeNumber);
+      break;
+  }
 
   // Index chapters for FTS5 search (diacritic-normalized inside indexChapter).
-  cleanedContent.forEach((content, i) => indexChapter(bookId, i, content));
+  staged.chapters.forEach((content, i) => indexChapter(bookId, i, content));
 
   return bookId;
 }

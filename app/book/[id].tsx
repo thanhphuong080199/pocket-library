@@ -5,16 +5,16 @@ import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { CharacterCard, PowerStageRow } from "@/src/components/CharacterProfile";
 import { useBookAI, type AIFeature } from "@/src/hooks/useBookAI";
 import { useSeriesKB } from "@/src/hooks/useSeriesKB";
 import { cancelAnalysis } from "@/src/services/kbRunner";
 import {
   getBook,
+  getBookVolume,
   getChapters,
-  getCharacterEvents,
-  type Character,
-  type CharacterEvent,
-  type PowerStage,
+  getSeries,
+  getSeriesIdForBook,
 } from "@/src/services/db";
 import { TAG_LABELS_VI } from "@/src/services/gemini";
 import { useBookStore } from "@/src/store/bookStore";
@@ -33,6 +33,16 @@ export default function BookDetailScreen() {
   const chapters = useMemo(() => (book ? getChapters(book.id) : []), [book]);
   const ai = useBookAI(book, chapters);
   const kb = useSeriesKB(book);
+
+  // Series membership (for the "view series" link on multi-volume series).
+  const seriesInfo = useMemo(() => {
+    if (!book) return null;
+    const seriesId = getSeriesIdForBook(book.id);
+    if (!seriesId) return null;
+    const series = getSeries(seriesId);
+    if (!series || series.totalVolumesImported <= 1) return null;
+    return { id: seriesId, name: series.name, volume: getBookVolume(book.id) };
+  }, [book]);
 
   // Load this book into the reader context so Read / Search / Bookmarks work.
   useEffect(() => {
@@ -93,6 +103,20 @@ export default function BookDetailScreen() {
             <Text style={[styles.meta, { color: colors.muted }]}>
               {(book.format || "book").toUpperCase()} · {titles.length} chương
             </Text>
+            {seriesInfo && (
+              <Pressable
+                onPress={() =>
+                  router.navigate({ pathname: "/series/[id]", params: { id: seriesInfo.id } })
+                }
+                style={styles.seriesLink}
+                hitSlop={6}>
+                <Ionicons name="albums-outline" size={14} color={colors.text} />
+                <Text style={[styles.seriesLinkText, { color: colors.text }]} numberOfLines={1}>
+                  {seriesInfo.name} · Tập {seriesInfo.volume}
+                </Text>
+                <Ionicons name="chevron-forward" size={13} color={colors.muted} />
+              </Pressable>
+            )}
           </View>
         </View>
 
@@ -218,7 +242,14 @@ export default function BookDetailScreen() {
           {kb.kb.characters.length > 0 ? (
             <View style={{ gap: 12 }}>
               {kb.kb.characters.map((c) => (
-                <CharacterCard key={c.id} character={c} colors={colors} />
+                <CharacterCard
+                  key={c.id}
+                  character={c}
+                  colors={colors}
+                  onPress={() =>
+                    router.navigate({ pathname: "/character/[id]", params: { id: c.id } })
+                  }
+                />
               ))}
             </View>
           ) : (
@@ -354,103 +385,6 @@ function AISection<T>({
   );
 }
 
-function PowerStageRow({ stage, colors }: { stage: PowerStage; colors: SectionColors }) {
-  return (
-    <View style={styles.psRow}>
-      <Text style={[styles.psName, { color: colors.text }]}>{stage.stageName}</Text>
-      {!!stage.description && (
-        <Text style={[styles.charLine, { color: colors.muted }]}>{stage.description}</Text>
-      )}
-    </View>
-  );
-}
-
-/** Vietnamese display labels for the model's English role values. */
-const ROLE_LABELS_VI: Record<string, string> = {
-  protagonist: "Nhân vật chính",
-  antagonist: "Phản diện",
-  supporting: "Nhân vật phụ",
-};
-
-/** Labeled character profile (Name / Gender / Power / …) from the series KB. */
-function CharacterCard({ character, colors }: { character: Character; colors: SectionColors }) {
-  const c = character;
-  // Reload the life-history events whenever this character advances in the book.
-  const events = useMemo(
-    () => getCharacterEvents(c.id),
-    [c.id, c.lastSeenVolume, c.lastSeenChapter],
-  );
-
-  // Relationships: "relation" is stored from THIS character's point of view — it
-  // states what the named person is TO this character (see deltaExtractor prompt),
-  // so "B (vợ)" on A's card means B is A's wife.
-  const rels = c.relationships.map((r) => `${r.name} (${r.relation})`).join(", ");
-  // Merge Strengths (current realm/power) and Skills into one field — they
-  // overlap heavily in practice, so a single line reads cleaner.
-  const powerAndSkills = [c.currentPower, c.skills.join(", ")].filter(Boolean).join(" · ");
-  const role = c.role ? (ROLE_LABELS_VI[c.role.toLowerCase()] ?? c.role) : undefined;
-
-  return (
-    <View style={[styles.charCard, { borderColor: colors.muted }]}>
-      <Text style={[styles.charName, { color: colors.text }]}>{c.name}</Text>
-      <Field label="Giới tính" value={c.gender} colors={colors} />
-      <Field label="Vai trò" value={role} colors={colors} />
-      <Field label="Sức mạnh & kỹ năng" value={powerAndSkills} colors={colors} />
-      <Field label="Thế lực" value={c.faction} colors={colors} />
-      <Field label="Biệt danh" value={c.aliases.join(", ")} colors={colors} />
-      <Field label="Quan hệ" value={rels} colors={colors} />
-      <Field label="Tính cách" value={c.personality} colors={colors} />
-      <Field label="Trạng thái" value={c.status} colors={colors} />
-      <Field label="Ngoại hình" value={c.appearance} colors={colors} />
-      <Field label="Lai lịch" value={c.backstory} colors={colors} />
-      <LifeHistory events={events} colors={colors} />
-    </View>
-  );
-}
-
-/**
- * Character life history: the full append-only event log in chronological order
- * (getCharacterEvents already sorts by volume then chapter), not just the latest
- * overwritten backstory.
- */
-function LifeHistory({ events, colors }: { events: CharacterEvent[]; colors: SectionColors }) {
-  const visible = events.filter((e) => e.description.trim().length > 0);
-  if (visible.length === 0) return null;
-  return (
-    <View style={styles.timeline}>
-      <Text style={[styles.charLine, { color: colors.muted, fontWeight: "600" }]}>Tiểu sử:</Text>
-      {visible.map((e) => (
-        <Text key={e.id} style={[styles.timelineItem, { color: colors.text }]}>
-          {"• "}
-          {e.chapter > 0 && (
-            <Text style={{ color: colors.muted }}>{`Chương ${e.chapter + 1}: `}</Text>
-          )}
-          {e.description}
-        </Text>
-      ))}
-    </View>
-  );
-}
-
-/** A labeled `Label: value` line; renders nothing when the value is empty. */
-function Field({
-  label,
-  value,
-  colors,
-}: {
-  label: string;
-  value?: string;
-  colors: SectionColors;
-}) {
-  if (!value) return null;
-  return (
-    <Text style={[styles.charLine, { color: colors.text }]}>
-      <Text style={{ color: colors.muted, fontWeight: "600" }}>{label}: </Text>
-      {value}
-    </Text>
-  );
-}
-
 const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { alignItems: "center", justifyContent: "center" },
@@ -482,13 +416,13 @@ const styles = StyleSheet.create({
   sectionTitle: { fontSize: 13, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 },
   placeholder: { fontSize: 14, fontStyle: "italic", lineHeight: 20 },
   bodyText: { fontSize: 15, lineHeight: 23 },
-  charCard: { borderWidth: 1, borderRadius: 10, padding: 12, gap: 4 },
-  charName: { fontSize: 16, fontWeight: "700", marginBottom: 2 },
-  charLine: { fontSize: 13, lineHeight: 19 },
-  timeline: { marginTop: 4, gap: 3 },
-  timelineItem: { fontSize: 13, lineHeight: 19, paddingLeft: 4 },
-  psRow: { gap: 2 },
-  psName: { fontSize: 15, fontWeight: "600" },
+  seriesLink: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginTop: 6,
+  },
+  seriesLinkText: { fontSize: 13, fontWeight: "600", flexShrink: 1 },
   tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   tag: { borderWidth: 1, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 5 },
   aiBtn: {
