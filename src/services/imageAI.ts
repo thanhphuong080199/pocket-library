@@ -13,7 +13,7 @@
  * best face-consistency lever a stateless prompt→image URL service offers.
  */
 import { styleForGenre } from "@/src/constants/styleMap";
-import type { Book, Character, CharacterEvent } from "./db";
+import type { Book, Character, CharacterEvent, Location } from "./db";
 import { isGeminiConfigured, runPrompt } from "./gemini";
 
 const BASE = "https://image.pollinations.ai/prompt/";
@@ -118,4 +118,18 @@ export async function generateStagePortraitUrl(
   const scene = await characterScene(c, event.description);
   const prompt = `character portrait, ${scene}, ${styleForGenre(styleTag)}`;
   return pollinationsUrl(prompt, { width: 400, height: 600, seed: seedFromId(c.id) });
+}
+
+/**
+ * Scenery illustration for a KB location — synchronous, no Gemini call: the
+ * extractor already wrote an ENGLISH `visualPrompt` per location (see
+ * deltaExtractor.ts), so unlike covers/portraits there is no translate step.
+ * Falls back to the Vietnamese name + description for rows that predate the
+ * field. Landscape 16:9; seeded by id so the place looks the same forever.
+ */
+export function locationImageUrl(l: Location, styleTag?: string): string {
+  if (l.imageUrl) return l.imageUrl;
+  const scene = l.visualPrompt?.trim() || [l.name, l.description].filter(Boolean).join(", ");
+  const prompt = `${scene}, ${styleForGenre(styleTag)}, scenery, wide shot, no people, no text`;
+  return pollinationsUrl(prompt, { width: 800, height: 450, seed: seedFromId(l.id) });
 }

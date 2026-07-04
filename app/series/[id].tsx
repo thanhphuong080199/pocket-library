@@ -21,7 +21,7 @@ import {
 import { getSeriesKB, type SeriesKB } from "@/src/services/knowledgeBase";
 import { THEMES, useSettingsStore } from "@/src/store/settingsStore";
 
-const EMPTY_KB: SeriesKB = { powerStages: [], characters: [], lore: [] };
+const EMPTY_KB: SeriesKB = { powerStages: [], characters: [], lore: [], locations: [] };
 
 export default function SeriesScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();

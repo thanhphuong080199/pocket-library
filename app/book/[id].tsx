@@ -6,10 +6,9 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { CharacterCard, PowerStageRow } from "@/src/components/CharacterProfile";
+import { LocationCard } from "@/src/components/LocationCard";
 import { useBookAI, type AIFeature } from "@/src/hooks/useBookAI";
 import { useSeriesKB } from "@/src/hooks/useSeriesKB";
-import { generateCoverUrl } from "@/src/services/imageAI";
-import { cancelAnalysis } from "@/src/services/kbRunner";
 import {
   getBook,
   getBookVolume,
@@ -18,7 +17,10 @@ import {
   getSeriesIdForBook,
   updateBookCover,
 } from "@/src/services/db";
+import { deriveLocations } from "@/src/services/deltaExtractor";
 import { TAG_LABELS_VI } from "@/src/services/gemini";
+import { generateCoverUrl } from "@/src/services/imageAI";
+import { cancelAnalysis } from "@/src/services/kbRunner";
 import { useBookStore } from "@/src/store/bookStore";
 import { THEMES, useSettingsStore } from "@/src/store/settingsStore";
 
@@ -279,7 +281,11 @@ export default function BookDetailScreen() {
           initialCollapsed>
           {kb.kb.characters.length > 0 ? (
             <View style={{ gap: 12 }}>
-              {kb.kb.characters.map((c) => (
+              {/* Preview only: profile cards are tall and a webnovel can extract
+                  50+ characters — the full searchable list is its own screen.
+                  getCharacters orders by plot importance, so slicing keeps the
+                  main cast. */}
+              {kb.kb.characters.slice(0, CHARACTER_PREVIEW_COUNT).map((c) => (
                 <CharacterCard
                   key={c.id}
                   character={c}
@@ -289,6 +295,18 @@ export default function BookDetailScreen() {
                   }
                 />
               ))}
+              {kb.kb.characters.length > CHARACTER_PREVIEW_COUNT && !!kb.seriesId && (
+                <Pressable
+                  onPress={() =>
+                    router.navigate({ pathname: "/characters", params: { seriesId: kb.seriesId! } })
+                  }
+                  style={[styles.viewAllRow, { borderColor: colors.muted }]}>
+                  <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                    Xem tất cả {kb.kb.characters.length} nhân vật
+                  </Text>
+                  <Ionicons name="chevron-forward" size={15} color={colors.muted} />
+                </Pressable>
+              )}
             </View>
           ) : (
             <Text style={[styles.placeholder, { color: colors.muted }]}>
@@ -296,6 +314,8 @@ export default function BookDetailScreen() {
             </Text>
           )}
         </Section>
+
+        <LocationsSection kb={kb} genreTag={book.tags[0]} colors={colors} />
 
         {/* Chapter index (real) */}
         <Section title={`Danh sách chương (${titles.length})`} colors={colors} collapsible initialCollapsed>
@@ -319,7 +339,91 @@ export default function BookDetailScreen() {
   );
 }
 
+/** How many character cards to show inline before deferring to /characters. */
+const CHARACTER_PREVIEW_COUNT = 5;
+
 type SectionColors = { text: string; muted: string };
+
+/**
+ * "Địa danh & bối cảnh": AI scenery illustrations of the KB's notable places.
+ * New analyses extract locations as part of the per-chunk delta; for a series
+ * analyzed before that existed, this offers a one-call backfill from the
+ * already-stored lore (deriveLocations) instead of a full re-analysis.
+ */
+function LocationsSection({
+  kb,
+  genreTag,
+  colors,
+}: {
+  kb: ReturnType<typeof useSeriesKB>;
+  genreTag?: string;
+  colors: SectionColors;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const locations = kb.kb.locations;
+  // Backfill needs extracted lore/factions to mine locations from.
+  const canDerive = kb.kb.lore.length > 0 || kb.kb.characters.length > 0;
+
+  const derive = async () => {
+    if (!kb.seriesId || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const added = await deriveLocations(kb.seriesId);
+      kb.reload();
+      if (added === 0) setError("Không tìm thấy địa danh nào trong dữ liệu đã phân tích.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section
+      title={`Địa danh & bối cảnh${locations.length ? ` (${locations.length})` : ""}`}
+      colors={colors}
+      collapsible
+      initialCollapsed>
+      {locations.length > 0 ? (
+        <View style={{ gap: 12 }}>
+          {locations.map((l) => (
+            <LocationCard key={l.id} location={l} colors={colors} genreTag={genreTag} />
+          ))}
+        </View>
+      ) : (
+        <Text style={[styles.placeholder, { color: colors.muted }]}>
+          {canDerive
+            ? "Truyện được phân tích trước khi có mục địa danh — trích xuất từ dữ liệu sẵn có (1 lượt gọi AI), kèm minh hoạ."
+            : "Chưa có địa danh — hãy chạy phân tích truyện ở trên để trích xuất kèm minh hoạ."}
+        </Text>
+      )}
+
+      {locations.length === 0 && canDerive && (
+        <Pressable
+          onPress={derive}
+          disabled={busy}
+          style={[
+            styles.aiBtn,
+            styles.aiBtnInline,
+            { borderColor: colors.muted, opacity: busy ? 0.6 : 1 },
+          ]}>
+          {busy ? (
+            <ActivityIndicator size="small" color={colors.text} />
+          ) : (
+            <Ionicons name="image-outline" size={16} color={colors.text} />
+          )}
+          <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+            {busy ? "Đang trích xuất…" : "Trích xuất địa danh"}
+          </Text>
+        </Pressable>
+      )}
+
+      {!!error && <Text style={[styles.aiError, { color: "#c0392b" }]}>{error}</Text>}
+    </Section>
+  );
+}
 
 function Section({
   title,
@@ -485,6 +589,15 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
   },
   aiBtnInline: { marginTop: 12 },
+  viewAllRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 20,
+    paddingVertical: 10,
+  },
   kbRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 12 },
   aiError: { fontSize: 13, marginTop: 8 },
   chapterRow: {
