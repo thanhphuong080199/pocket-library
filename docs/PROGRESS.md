@@ -8,7 +8,7 @@ Living tracker for the build. Update the status box + checklists as work lands. 
 
 ## Current status
 
-- **Phase:** 4 done + **Phase 5 complete (engine + Step B UX)**, pending on-device test. Whole-book analysis (`deltaExtractor` + `kbRunner`) runs detached with an app-wide progress banner, big 300K chunks + JSON mode, pause/auto-resume + checkpoint. **Step B (2026-07-04):** series-assign on import (standalone / new / add-to-existing + volume) with a post-import "Analyze now?" hook, `seriesManager`, `character/[id]` profile screen, `series/[id]` cross-volume KB view, orphan-series cleanup on delete. Next: **Phase 6** (AI images + polish).
+- **Phase:** 5 complete + **Phase 6 AI art built** (2026-07-04), both pending on-device test. Phase 5: series-assign on import, `seriesManager`, `character/[id]` + `series/[id]` screens (branch `feat/series-ux`). Phase 6: `imageAI.ts` (Pollinations + vi→en prompt via Gemini, per-character seed), AI book covers, character portraits + **appearance-stage gallery** (`appearance_change` delta events; outfit changes excluded by design) (branch `feat/ai-images`, stacked on series-ux). Remaining: settings polish (feedback-driven) + on-device test rounds.
 - **2026-07-02 — bug-fix + player UX round (verified on emulator with a real EPUB):**
   - **Fixed chapter-nav crash:** `TtsForegroundService.onStartCommand` now calls `startForeground()` unconditionally before dispatching (every `startForegroundService()` start must, even ACTION_STOP — skipping it kills the app); `tts.stop()` no longer spins up the service when idle.
   - **Fixed silent first Play tap + ignored voice settings:** speak requests that race the async TTS engine init are stored (`pendingStart`) and replayed from the init callback; rate/pitch/voice are service fields applied inside `speakFrom()` so resume/replay/skip all honor them.
@@ -153,10 +153,14 @@ First on-device test (import + basics work). Reworked the reading experience:
 - **Import already auto-makes a series:** `import.ts` currently creates a standalone 1-vol series per book. Phase 5 must **intercept/route** that (assign-to-existing vs new) rather than adding a parallel path.
 - **Quota reality:** the cost is ~**one Gemini call per chunk** on the first read — the `hasChanges:false` skip only avoids the local SQLite merge, **not** a Gemini call. So the single-book lever is **fewer/larger chunks**, and the KB delta's real saving is **cross-volume / re-run** (later volumes only extract their delta). Run sequentially, lean on `callGemini`'s 429 cooldowns (1500 req/day + ~15 RPM free caps), cache in SQLite forever. True OS-background processing needs the deferred foreground-service work; in Expo Go it's just an async job + progress UI.
 
-### Phase 6 — AI images + polish (Wk 8)
-- ⬜ `src/services/imageAI.ts` (Pollinations URLs, vi→en translate step)
-- ⬜ Book covers + character art
-- ⬜ Settings screen polish, theme/font, TTS voice picker
+### Phase 6 — AI images + polish (Wk 8) 🟡 (art built 2026-07-04, pending on-device test)
+- ✅ `src/services/imageAI.ts` — Pollinations URL builder (`pollinationsUrl`, 400×600, `nologo`), **vi→en prompt step via `gemini.runPrompt`** (soft-fails to the raw Vietnamese text when no key / on error — an image is a nice-to-have, never blocks), style from `STYLE_MAP` via a book tag. **Stable per-character `seed`** (djb2 of character id, `seedFromId`) so regenerations + stage portraits keep the same face as much as a stateless prompt→image service allows. Generated URLs are persisted forever (cache-first): `books.coverUrl`, `characters.imageUrl`, `character_events.imageUrl`.
+- ✅ **AI book covers** — "Tạo bìa AI" button on the book detail header when a book imported without a cover; persists via `updateBookCover` so the library grid picks it up.
+- ✅ **Character art** — canonical portrait on `character/[id]` (generate/re-generate button; art style = series' first volume's first tag); `CharacterCard` shows a thumbnail when `imageUrl` exists.
+- ✅ **Appearance stages** (design decision 2026-07-04: life-stage/transformation changes get separate art; outfit changes do NOT): delta prompt gained an `appearanceChange` field — ONLY when the physical form fundamentally changes (life stage, transformation, permanent injury; clothing/hair explicitly excluded), carrying the **complete** new description. Logged as `character_events` type **`appearance_change`** (new event type) so each stage survives the scalar-overwrite of `characters.appearance` (which it also updates); regular `event` slot unaffected. `character/[id]` shows a horizontal **"Qua các giai đoạn" gallery** (per-stage generate button → `character_events.imageUrl`, same seed as the canonical portrait). NB: books analyzed before this change have no stage events until re-analyzed.
+- ✅ **First additive DB migration** — `character_events.imageUrl` added via `CREATE TABLE` **plus** a try/catch `ALTER TABLE` in `initDB`, so existing installs keep their data (departure from the earlier "wipe app data" convention; use this pattern for future column additions).
+- ⬜ Settings screen polish — deferred until after on-device testing (feedback-driven).
+- ⚠️ tsc + lint + Android bundle clean; **needs on-device test** (Pollinations image quality/latency, vi→en prompt quality, seed-based face consistency).
 
 ---
 

@@ -54,6 +54,7 @@ const EVENT_TYPES: CharacterEventType[] = [
   "relationship",
   "death",
   "reveal",
+  "appearance_change",
   "other",
 ];
 
@@ -91,6 +92,13 @@ interface DeltaCharacter {
   /** What happened to them in this chunk (logged to character_events). */
   event?: string;
   eventType?: CharacterEventType;
+  /**
+   * Full new physical description when the character's FORM fundamentally
+   * changes (life stage, transformation, permanent injury) — NOT outfits.
+   * Snapshots each stage into character_events (type appearance_change) so
+   * stage portraits can be generated later; also overwrites `appearance`.
+   */
+  appearanceChange?: string;
 }
 
 interface Delta {
@@ -192,7 +200,8 @@ Return ONLY valid JSON (no markdown, no prose) in exactly this shape:
       "newSkills": ["kỹ năng / công pháp mới"],
       "newRelationships": [{ "name": "tên người liên quan", "relation": "người đó LÀ GÌ của nhân vật này" }],
       "event": "điều xảy ra với nhân vật trong đoạn này",
-      "eventType": "power_up | relationship | death | reveal | other"
+      "eventType": "power_up | relationship | death | reveal | other",
+      "appearanceChange": "mô tả ngoại hình HOÀN CHỈNH mới, CHỈ khi hình dạng cơ thể thay đổi căn bản"
     }
   ],
   "newLore": "thông tin thế giới / bối cảnh mới, hoặc null"
@@ -210,6 +219,11 @@ Rules:
   { "name": "B", "relation": "vợ" } means B is A's wife; the reciprocal entry in nhân vật B's
   list is { "name": "A", "relation": "chồng" } (A is B's husband). Never store the relation from
   the other person's perspective.
+- "appearanceChange": ONLY when the character's PHYSICAL FORM fundamentally changes — a new life
+  stage (trẻ con → trưởng thành, lão hoá), a transformation (hoá thân, đổi thân thể, mọc
+  cánh/sừng), or a permanent bodily change (mất chi, sẹo lớn, tóc bạc trắng). Give the COMPLETE
+  new physical description, not just the difference. Do NOT report clothing, armor, accessories,
+  or hairstyle changes — leave it null for those. First introductions go in "appearance", not here.
 - Use "" / [] / null for anything the text does not reveal — never invent.
 - All Vietnamese text; keep proper nouns (Hán Việt) intact.
 - If there is genuinely nothing new, return { "hasChanges": false }.
@@ -279,7 +293,7 @@ function mergeDelta(
         currentPower: c.powerChange,
         faction: c.faction,
         aliases: c.aliases,
-        appearance: c.appearance,
+        appearance: c.appearanceChange ?? c.appearance,
         personality: c.personality,
         backstory: c.backstory,
         status: c.status,
@@ -295,6 +309,7 @@ function mergeDelta(
         faction: c.faction ?? "",
       });
       if (c.event) logEvent(newId, seriesId, volumeNumber, chapterIndex, c);
+      logAppearanceChange(newId, seriesId, volumeNumber, chapterIndex, c);
       continue;
     }
 
@@ -310,7 +325,10 @@ function mergeDelta(
       ...(c.faction ? { faction: c.faction } : {}),
       ...(c.gender ? { gender: c.gender } : {}),
       ...(c.role ? { role: c.role } : {}),
-      ...(c.appearance ? { appearance: c.appearance } : {}),
+      // A fundamental form change supersedes any incidental appearance text.
+      ...(c.appearanceChange || c.appearance
+        ? { appearance: c.appearanceChange || c.appearance }
+        : {}),
       ...(c.personality ? { personality: c.personality } : {}),
       ...(c.backstory ? { backstory: c.backstory } : {}),
       ...(c.status ? { status: c.status } : {}),
@@ -332,6 +350,7 @@ function mergeDelta(
     }
 
     if (c.event) logEvent(id, seriesId, volumeNumber, chapterIndex, c);
+    logAppearanceChange(id, seriesId, volumeNumber, chapterIndex, c);
   }
 
   // Lore
@@ -378,6 +397,29 @@ function logEvent(
     chapter: chapterIndex,
     eventType: c.eventType ?? "other",
     description: c.event ?? "",
+  });
+}
+
+/**
+ * Snapshot a fundamental form change (life stage / transformation) as its own
+ * timeline entry. The description is the complete new physical description, so
+ * a stage portrait can be generated from the event alone (imageAI, Phase 6).
+ */
+function logAppearanceChange(
+  characterId: string,
+  seriesId: string,
+  volumeNumber: number,
+  chapterIndex: number,
+  c: DeltaCharacter,
+): void {
+  if (!c.appearanceChange) return;
+  insertCharacterEvent({
+    characterId,
+    seriesId,
+    volume: volumeNumber,
+    chapter: chapterIndex,
+    eventType: "appearance_change",
+    description: c.appearanceChange,
   });
 }
 
@@ -509,6 +551,7 @@ function cleanCharacters(v: unknown): DeltaCharacter[] {
       newRelationships: relArray(r.newRelationships),
       event: str(r.event) || undefined,
       eventType: EVENT_TYPES.includes(eventType) ? eventType : undefined,
+      appearanceChange: str(r.appearanceChange) || undefined,
     });
   }
   return out;
