@@ -8,6 +8,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { CharacterCard, PowerStageRow } from "@/src/components/CharacterProfile";
 import { useBookAI, type AIFeature } from "@/src/hooks/useBookAI";
 import { useSeriesKB } from "@/src/hooks/useSeriesKB";
+import { generateCoverUrl } from "@/src/services/imageAI";
 import { cancelAnalysis } from "@/src/services/kbRunner";
 import {
   getBook,
@@ -15,6 +16,7 @@ import {
   getChapters,
   getSeries,
   getSeriesIdForBook,
+  updateBookCover,
 } from "@/src/services/db";
 import { TAG_LABELS_VI } from "@/src/services/gemini";
 import { useBookStore } from "@/src/store/bookStore";
@@ -33,6 +35,22 @@ export default function BookDetailScreen() {
   const chapters = useMemo(() => (book ? getChapters(book.id) : []), [book]);
   const ai = useBookAI(book, chapters);
   const kb = useSeriesKB(book);
+
+  // AI cover for books that imported without one (Pollinations, free). The
+  // generated URL is persisted, so this is a one-time manual action per book.
+  const [aiCover, setAiCover] = useState<string | null>(null);
+  const [coverBusy, setCoverBusy] = useState(false);
+  const makeCover = async () => {
+    if (!book || coverBusy) return;
+    setCoverBusy(true);
+    try {
+      const url = await generateCoverUrl(book);
+      updateBookCover(book.id, url);
+      setAiCover(url);
+    } finally {
+      setCoverBusy(false);
+    }
+  };
 
   // Series membership (for the "view series" link on multi-volume series).
   const seriesInfo = useMemo(() => {
@@ -85,8 +103,13 @@ export default function BookDetailScreen() {
         {/* Header */}
         <View style={styles.header}>
           <View style={[styles.cover, { backgroundColor: colors.muted }]}>
-            {book.coverUrl ? (
-              <Image source={{ uri: book.coverUrl }} style={styles.coverImg} contentFit="cover" />
+            {aiCover || book.coverUrl ? (
+              <Image
+                source={{ uri: aiCover ?? book.coverUrl }}
+                style={styles.coverImg}
+                contentFit="cover"
+                transition={200}
+              />
             ) : (
               <View style={styles.coverFallback}>
                 <Text style={styles.coverFallbackText} numberOfLines={5}>
@@ -103,6 +126,21 @@ export default function BookDetailScreen() {
             <Text style={[styles.meta, { color: colors.muted }]}>
               {(book.format || "book").toUpperCase()} · {titles.length} chương
             </Text>
+            {!book.coverUrl && !aiCover && (
+              <Pressable
+                onPress={makeCover}
+                disabled={coverBusy}
+                style={[styles.coverBtn, { borderColor: colors.muted, opacity: coverBusy ? 0.6 : 1 }]}>
+                {coverBusy ? (
+                  <ActivityIndicator size="small" color={colors.text} />
+                ) : (
+                  <Ionicons name="color-palette-outline" size={15} color={colors.text} />
+                )}
+                <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                  Tạo bìa AI
+                </Text>
+              </Pressable>
+            )}
             {seriesInfo && (
               <Pressable
                 onPress={() =>
@@ -421,6 +459,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 5,
     marginTop: 6,
+  },
+  coverBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    marginTop: 8,
   },
   seriesLinkText: { fontSize: 13, fontWeight: "600", flexShrink: 1 },
   tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },

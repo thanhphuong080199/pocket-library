@@ -134,8 +134,9 @@ export function initDB(): void {
       seriesId TEXT NOT NULL,
       volume INTEGER,
       chapter INTEGER,
-      eventType TEXT,           -- 'power_up' | 'relationship' | 'death' | 'reveal' | 'other'
-      description TEXT
+      eventType TEXT,           -- 'power_up' | 'relationship' | 'death' | 'reveal' | 'appearance_change' | 'other'
+      description TEXT,
+      imageUrl TEXT             -- stage portrait for appearance_change events
     );
 
     -- World lore — accumulate across volumes.
@@ -153,6 +154,15 @@ export function initDB(): void {
     CREATE VIRTUAL TABLE IF NOT EXISTS book_content_fts
       USING fts5(bookId UNINDEXED, chapterIndex UNINDEXED, content, content_normalized);
   `);
+
+  // Additive migrations for DBs created before a column existed (CREATE TABLE
+  // IF NOT EXISTS won't touch them). ALTER fails harmlessly when the column is
+  // already there — cheaper than forcing a data wipe on every schema addition.
+  try {
+    db.execSync("ALTER TABLE character_events ADD COLUMN imageUrl TEXT");
+  } catch {
+    /* column already exists */
+  }
 }
 
 /**
@@ -774,6 +784,10 @@ export function insertCharacterEvent(event: Omit<CharacterEvent, "id">): string 
   return id;
 }
 
+export function updateCharacterEventImage(eventId: string, imageUrl: string): void {
+  db.runSync("UPDATE character_events SET imageUrl = ? WHERE id = ?", [imageUrl, eventId]);
+}
+
 export function getCharacterEvents(characterId: string): CharacterEvent[] {
   return db.getAllSync<CharacterEvent>(
     "SELECT * FROM character_events WHERE characterId = ? ORDER BY volume ASC, chapter ASC",
@@ -903,6 +917,7 @@ export type CharacterEventType =
   | "relationship"
   | "death"
   | "reveal"
+  | "appearance_change"
   | "other";
 
 export interface CharacterEvent {
@@ -913,6 +928,8 @@ export interface CharacterEvent {
   chapter: number;
   eventType: CharacterEventType;
   description: string;
+  /** Stage portrait (appearance_change events only), generated on demand. */
+  imageUrl?: string;
 }
 
 export interface WorldLore {

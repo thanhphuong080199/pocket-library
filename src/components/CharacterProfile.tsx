@@ -3,6 +3,7 @@
  * profile card, its life-history timeline, and the power-stage row. Used by
  * the book detail page, the character screen, and the series view.
  */
+import { Image } from "expo-image";
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
@@ -65,7 +66,14 @@ export function CharacterCard({
 
   const body = (
     <>
-      <Text style={[styles.charName, { color: colors.text }]}>{c.name}</Text>
+      {c.imageUrl ? (
+        <View style={styles.charHeader}>
+          <Image source={{ uri: c.imageUrl }} style={styles.charAvatar} contentFit="cover" transition={150} />
+          <Text style={[styles.charName, { color: colors.text, flex: 1 }]}>{c.name}</Text>
+        </View>
+      ) : (
+        <Text style={[styles.charName, { color: colors.text }]}>{c.name}</Text>
+      )}
       <Field label="Giới tính" value={c.gender} colors={colors} />
       <Field label="Vai trò" value={roleLabel(c.role)} colors={colors} />
       <Field label="Sức mạnh & kỹ năng" value={powerAndSkills} colors={colors} />
@@ -143,6 +151,8 @@ export function Field({
 
 const styles = StyleSheet.create({
   charCard: { borderWidth: 1, borderRadius: 10, padding: 12, gap: 4 },
+  charHeader: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 4 },
+  charAvatar: { width: 44, height: 60, borderRadius: 6 },
   charName: { fontSize: 16, fontWeight: "700", marginBottom: 2 },
   charLine: { fontSize: 13, lineHeight: 19 },
   timeline: { marginTop: 4, gap: 3 },
