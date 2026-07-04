@@ -19,7 +19,7 @@ import {
 } from "@/src/services/db";
 import { useKBStore } from "@/src/store/kbStore";
 
-const EMPTY_KB: SeriesKB = { powerStages: [], characters: [], lore: [] };
+const EMPTY_KB: SeriesKB = { powerStages: [], characters: [], lore: [], locations: [] };
 
 export type KBStatus = "idle" | "running" | "paused" | "error" | "done";
 
@@ -68,6 +68,9 @@ export function useSeriesKB(book: Book | null) {
 
   return {
     kb,
+    seriesId,
+    /** Re-read the KB from SQLite (e.g. after an out-of-band write like the location backfill). */
+    reload,
     status,
     error: mine ? jobError : null,
     progress: mine && job ? { current: job.current, total: job.total } : null,

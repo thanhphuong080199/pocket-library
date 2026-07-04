@@ -149,6 +149,22 @@ export function initDB(): void {
       discoveredAtVolume INTEGER
     );
 
+    -- Notable locations — accumulate across volumes (series-scoped). The
+    -- visualPrompt is an ENGLISH scene description written by the extractor,
+    -- fed to the image AI (Pollinations handles English far better than
+    -- Vietnamese) — see src/services/imageAI.ts.
+    CREATE TABLE IF NOT EXISTS locations (
+      id TEXT PRIMARY KEY,
+      seriesId TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT,                -- 'thành phố' | 'tông môn' | 'bí cảnh' | ... (display)
+      description TEXT,
+      significance TEXT,
+      visualPrompt TEXT,        -- English, for image generation
+      imageUrl TEXT,            -- optional override; derived from visualPrompt when empty
+      discoveredAtVolume INTEGER
+    );
+
     -- Full-text search. Store original + diacritic-normalized content; we
     -- MATCH against the normalized column so Vietnamese search is accent-insensitive.
     CREATE VIRTUAL TABLE IF NOT EXISTS book_content_fts
@@ -182,6 +198,7 @@ export function resetDatabase(): void {
     DROP TABLE IF EXISTS characters;
     DROP TABLE IF EXISTS character_events;
     DROP TABLE IF EXISTS world_lore;
+    DROP TABLE IF EXISTS locations;
     DROP TABLE IF EXISTS book_content_fts;
   `);
   initDB();
@@ -486,6 +503,7 @@ export function clearSeriesKB(seriesId: string): void {
   db.runSync("DELETE FROM character_events WHERE seriesId = ?", [seriesId]);
   db.runSync("DELETE FROM characters WHERE seriesId = ?", [seriesId]);
   db.runSync("DELETE FROM world_lore WHERE seriesId = ?", [seriesId]);
+  db.runSync("DELETE FROM locations WHERE seriesId = ?", [seriesId]);
 }
 
 // ---------------------------------------------------------------------------
@@ -821,6 +839,76 @@ export function getWorldLore(seriesId: string): WorldLore[] {
 }
 
 // ---------------------------------------------------------------------------
+// Locations
+// ---------------------------------------------------------------------------
+
+export function insertLocation(loc: Omit<Location, "id">): string {
+  const id = genId("loc");
+  db.runSync(
+    `INSERT INTO locations (id, seriesId, name, type, description, significance, visualPrompt, imageUrl, discoveredAtVolume)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      loc.seriesId,
+      loc.name,
+      loc.type ?? "",
+      loc.description ?? "",
+      loc.significance ?? "",
+      loc.visualPrompt ?? "",
+      loc.imageUrl ?? "",
+      loc.discoveredAtVolume ?? 0,
+    ],
+  );
+  return id;
+}
+
+/**
+ * Partial-update a location's enrichable fields (same accretion pattern as
+ * `updateCharacter`): only provided keys are written, so later volumes add
+ * detail without wiping earlier data.
+ */
+export function updateLocation(
+  id: string,
+  fields: Partial<{
+    type: string;
+    description: string;
+    significance: string;
+    visualPrompt: string;
+    imageUrl: string;
+  }>,
+): void {
+  const sets: string[] = [];
+  const params: string[] = [];
+  for (const key of ["type", "description", "significance", "visualPrompt", "imageUrl"] as const) {
+    const val = fields[key];
+    if (val !== undefined) {
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+  }
+  if (sets.length === 0) return;
+  params.push(id);
+  db.runSync(`UPDATE locations SET ${sets.join(", ")} WHERE id = ?`, params);
+}
+
+/** Find a location in a series by exact name. Returns its id or null. */
+export function findLocation(seriesId: string, name: string): string | null {
+  const row = db.getFirstSync<{ id: string }>(
+    "SELECT id FROM locations WHERE seriesId = ? AND name = ? LIMIT 1",
+    [seriesId, name],
+  );
+  return row?.id ?? null;
+}
+
+/** Locations in discovery order (earliest volume first, then name). */
+export function getLocations(seriesId: string): Location[] {
+  return db.getAllSync<Location>(
+    "SELECT * FROM locations WHERE seriesId = ? ORDER BY discoveredAtVolume ASC, name ASC",
+    [seriesId],
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Helpers + types
 // ---------------------------------------------------------------------------
 
@@ -938,6 +1026,22 @@ export interface WorldLore {
   category: string;
   title?: string;
   content: string;
+  discoveredAtVolume: number;
+}
+
+export interface Location {
+  id: string;
+  seriesId: string;
+  name: string;
+  /** Vietnamese display kind: 'thành phố' | 'tông môn' | 'bí cảnh' | … */
+  type?: string;
+  description?: string;
+  /** Why the place matters to the plot. */
+  significance?: string;
+  /** English scene description for the image AI (see imageAI.ts). */
+  visualPrompt?: string;
+  /** Optional stored override; when empty the UI derives a URL from visualPrompt. */
+  imageUrl?: string;
   discoveredAtVolume: number;
 }
 

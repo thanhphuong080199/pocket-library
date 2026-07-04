@@ -31,6 +31,7 @@ export default function RootLayout() {
         <Stack.Screen name="book/[id]" options={{ headerShown: false }} />
         <Stack.Screen name="series/[id]" options={{ headerShown: false }} />
         <Stack.Screen name="character/[id]" options={{ headerShown: false }} />
+        <Stack.Screen name="characters" options={{ headerShown: false }} />
         <Stack.Screen name="chapters" options={{ headerShown: false }} />
         <Stack.Screen name="search" options={{ headerShown: false }} />
         <Stack.Screen name="bookmarks" options={{ headerShown: false }} />

@@ -21,15 +21,19 @@
  */
 import {
   findCharacter,
+  findLocation,
   getCharacter,
   getCharacters,
+  getLocations,
   getPowerStages,
   getWorldLore,
   insertCharacter,
   insertCharacterEvent,
+  insertLocation,
   insertPowerStage,
   insertWorldLore,
   updateCharacter,
+  updateLocation,
   type CharacterEventType,
   type Relationship,
 } from "./db";
@@ -67,6 +71,8 @@ export interface KBSnapshot {
   powerStages: { name: string; rank: number; description: string }[];
   characters: { name: string; aliases: string[]; currentPower: string; faction: string }[];
   lore: string[];
+  /** Known location names only — enough for the model to skip re-reporting them. */
+  locations: string[];
 }
 
 interface DeltaPowerStage {
@@ -101,10 +107,21 @@ interface DeltaCharacter {
   appearanceChange?: string;
 }
 
+interface DeltaLocation {
+  name: string;
+  /** Vietnamese kind: 'thành phố' | 'tông môn' | 'bí cảnh' | … */
+  type?: string;
+  description?: string;
+  significance?: string;
+  /** English scene description for the image AI (see imageAI.ts). */
+  visualPrompt?: string;
+}
+
 interface Delta {
   hasChanges: boolean;
   newPowerStages?: DeltaPowerStage[];
   updatedCharacters?: DeltaCharacter[];
+  newLocations?: DeltaLocation[];
   newLore?: string;
 }
 
@@ -159,6 +176,7 @@ export function loadSnapshot(seriesId: string): KBSnapshot {
       faction: c.faction ?? "",
     })),
     lore: getWorldLore(seriesId).map((l) => l.content),
+    locations: getLocations(seriesId).map((l) => l.name),
   };
 }
 
@@ -204,6 +222,15 @@ Return ONLY valid JSON (no markdown, no prose) in exactly this shape:
       "appearanceChange": "mô tả ngoại hình HOÀN CHỈNH mới, CHỈ khi hình dạng cơ thể thay đổi căn bản"
     }
   ],
+  "newLocations": [
+    {
+      "name": "tên địa danh",
+      "type": "thành phố | tông môn | học viện | quốc gia | bí cảnh | vùng đất | khác",
+      "description": "mô tả địa danh",
+      "significance": "vai trò của nơi này trong câu chuyện",
+      "visualPrompt": "IN ENGLISH: a vivid one-sentence visual scene description of this place for an image generator — landscape, architecture, atmosphere, lighting"
+    }
+  ],
   "newLore": "thông tin thế giới / bối cảnh mới, hoặc null"
 }
 
@@ -224,6 +251,11 @@ Rules:
   cánh/sừng), or a permanent bodily change (mất chi, sẹo lớn, tóc bạc trắng). Give the COMPLETE
   new physical description, not just the difference. Do NOT report clothing, armor, accessories,
   or hairstyle changes — leave it null for those. First introductions go in "appearance", not here.
+- "newLocations": only NOTABLE places — recurring or plot-important (cities, sects, academies,
+  kingdoms, secret realms, battlegrounds). Skip one-off rooms/streets. Reuse the exact existing
+  name if the place is already in the knowledge base above.
+- "visualPrompt" MUST be written in English (it feeds an image generator); everything else stays
+  in Vietnamese.
 - Use "" / [] / null for anything the text does not reveal — never invent.
 - All Vietnamese text; keep proper nouns (Hán Việt) intact.
 - If there is genuinely nothing new, return { "hasChanges": false }.
@@ -246,6 +278,7 @@ async function extractDelta(
     hasChanges: parsed.hasChanges !== false, // default to true unless explicitly false
     newPowerStages: cleanPowerStages(parsed.newPowerStages),
     updatedCharacters: cleanCharacters(parsed.updatedCharacters),
+    newLocations: cleanLocations(parsed.newLocations),
     newLore: str(parsed.newLore) || undefined,
   };
 }
@@ -353,6 +386,9 @@ function mergeDelta(
     logAppearanceChange(id, seriesId, volumeNumber, chapterIndex, c);
   }
 
+  // Locations — insert-or-enrich by exact name (case-insensitive vs snapshot).
+  mergeLocations(seriesId, delta.newLocations ?? [], snapshot, volumeNumber);
+
   // Lore
   if (delta.newLore) {
     insertWorldLore({
@@ -362,6 +398,44 @@ function mergeDelta(
       discoveredAtVolume: volumeNumber,
     });
     snapshot.lore.push(delta.newLore);
+  }
+}
+
+/**
+ * Insert-or-enrich locations against the running snapshot. Matching is by
+ * exact name only (locations don't get aliases the way characters do); a
+ * re-seen place has its provided fields updated so later volumes add detail.
+ */
+function mergeLocations(
+  seriesId: string,
+  locations: DeltaLocation[],
+  snapshot: KBSnapshot,
+  volumeNumber: number,
+): void {
+  for (const loc of locations) {
+    const known = snapshot.locations.find((n) => n.toLowerCase() === loc.name.toLowerCase());
+    const id = known ? findLocation(seriesId, known) : null;
+
+    if (!id) {
+      insertLocation({
+        seriesId,
+        name: loc.name,
+        type: loc.type,
+        description: loc.description,
+        significance: loc.significance,
+        visualPrompt: loc.visualPrompt,
+        discoveredAtVolume: volumeNumber,
+      });
+      snapshot.locations.push(loc.name);
+      continue;
+    }
+
+    updateLocation(id, {
+      ...(loc.type ? { type: loc.type } : {}),
+      ...(loc.description ? { description: loc.description } : {}),
+      ...(loc.significance ? { significance: loc.significance } : {}),
+      ...(loc.visualPrompt ? { visualPrompt: loc.visualPrompt } : {}),
+    });
   }
 }
 
@@ -477,6 +551,56 @@ async function processText(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Location backfill (series analyzed before locations existed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive notable locations from the *already-extracted* KB (world lore +
+ * character factions) in a single Gemini call — a cheap backfill for series
+ * analyzed before `newLocations` was part of the delta, avoiding a full
+ * re-analysis. New extractions get locations from the per-chunk delta instead.
+ * Returns how many locations were added.
+ */
+export async function deriveLocations(seriesId: string): Promise<number> {
+  const snapshot = loadSnapshot(seriesId);
+  const factions = [...new Set(snapshot.characters.map((c) => c.faction).filter(Boolean))];
+  if (snapshot.lore.length === 0 && factions.length === 0) return 0;
+
+  const prompt = `
+Below is the accumulated knowledge base of a story (world lore + factions), in Vietnamese.
+From it, list the most important LOCATIONS of the story (5-10 places): cities, sects,
+academies, kingdoms, secret realms, battlegrounds. Skip minor one-off places.
+${snapshot.locations.length ? `Already known (do NOT repeat): ${snapshot.locations.join(", ")}` : ""}
+
+WORLD LORE:
+${snapshot.lore.join("\n")}
+
+FACTIONS: ${factions.join(", ")}
+
+Return ONLY a valid JSON array (no markdown, no prose) in exactly this shape:
+[
+  {
+    "name": "tên địa danh",
+    "type": "thành phố | tông môn | học viện | quốc gia | bí cảnh | vùng đất | khác",
+    "description": "mô tả địa danh",
+    "significance": "vai trò của nơi này trong câu chuyện",
+    "visualPrompt": "IN ENGLISH: a vivid one-sentence visual scene description of this place for an image generator — landscape, architecture, atmosphere, lighting"
+  }
+]
+
+Rules:
+- "visualPrompt" MUST be in English; everything else in Vietnamese, proper nouns (Hán Việt) intact.
+- Only include places the lore actually supports — never invent.
+- If the lore reveals no notable locations, return [].
+`.trim();
+
+  const raw = await runPrompt(prompt, { json: true, maxOutputTokens: 4096 });
+  const before = snapshot.locations.length;
+  mergeLocations(seriesId, cleanLocations(extractJson<unknown>(raw)), snapshot, 0);
+  return snapshot.locations.length - before;
+}
+
 /** Split near the middle, preferring a newline so we don't cut mid-sentence. */
 function splitPoint(text: string): number {
   const mid = Math.floor(text.length / 2);
@@ -552,6 +676,25 @@ function cleanCharacters(v: unknown): DeltaCharacter[] {
       event: str(r.event) || undefined,
       eventType: EVENT_TYPES.includes(eventType) ? eventType : undefined,
       appearanceChange: str(r.appearanceChange) || undefined,
+    });
+  }
+  return out;
+}
+
+function cleanLocations(v: unknown): DeltaLocation[] {
+  if (!Array.isArray(v)) return [];
+  const out: DeltaLocation[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const name = str(r.name);
+    if (!name) continue;
+    out.push({
+      name,
+      type: str(r.type) || undefined,
+      description: str(r.description) || undefined,
+      significance: str(r.significance) || undefined,
+      visualPrompt: str(r.visualPrompt) || undefined,
     });
   }
   return out;
