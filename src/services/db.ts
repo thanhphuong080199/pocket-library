@@ -251,11 +251,34 @@ export function updateBookTags(bookId: string, tags: string[]): void {
 }
 
 export function deleteBook(bookId: string): void {
+  // Remember which series the book belonged to so we can reap orphans after.
+  const seriesIds = db
+    .getAllSync<{ seriesId: string }>(
+      "SELECT seriesId FROM book_series WHERE bookId = ?",
+      [bookId],
+    )
+    .map((r) => r.seriesId);
+
   db.runSync("DELETE FROM books WHERE id = ?", [bookId]);
   db.runSync("DELETE FROM bookmarks WHERE bookId = ?", [bookId]);
   db.runSync("DELETE FROM ai_cache WHERE bookId = ?", [bookId]);
   db.runSync("DELETE FROM book_series WHERE bookId = ?", [bookId]);
   clearBookIndex(bookId);
+
+  // A series with no remaining volumes is dead weight (every standalone book
+  // gets an auto 1-vol series) — drop it plus its accumulated KB, so the
+  // "add to existing series" picker doesn't fill up with ghosts.
+  for (const seriesId of seriesIds) {
+    const left = db.getFirstSync<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM book_series WHERE seriesId = ?",
+      [seriesId],
+    );
+    if (!left || left.n === 0) {
+      clearSeriesKB(seriesId);
+      clearAnalysisState(seriesId);
+      db.runSync("DELETE FROM series WHERE id = ?", [seriesId]);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +439,15 @@ export function insertBookSeries(
     "INSERT OR REPLACE INTO book_series (bookId, seriesId, volumeNumber) VALUES (?, ?, ?)",
     [bookId, seriesId, volumeNumber],
   );
+}
+
+/**
+ * Remove every series link for a book (used before reassigning it — the
+ * PK is (bookId, seriesId), so a plain INSERT OR REPLACE into a *different*
+ * series would leave the old link behind).
+ */
+export function removeBookSeriesLinks(bookId: string): void {
+  db.runSync("DELETE FROM book_series WHERE bookId = ?", [bookId]);
 }
 
 export function getSeriesIdForBook(bookId: string): string | null {

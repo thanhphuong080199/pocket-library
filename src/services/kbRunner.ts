@@ -162,10 +162,12 @@ async function beginRun(seriesId: string, bookId: string, fresh: boolean): Promi
   const title = getBook(bookId)?.title ?? "Book";
 
   // Resume point: pick up where the checkpoint left off if the book is unchanged.
+  // Must be the *same book* — a series can hold multiple volumes, and a stale
+  // checkpoint from another volume would wrongly skip this book's chunks.
   let startChunk = 0;
   if (!fresh) {
     const cp = getAnalysisState(seriesId);
-    if (cp && cp.totalChunks === chunks.length && cp.status !== "done") {
+    if (cp && cp.bookId === bookId && cp.totalChunks === chunks.length && cp.status !== "done") {
       startChunk = Math.min(cp.nextChunk, chunks.length);
     }
   }

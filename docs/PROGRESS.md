@@ -8,7 +8,7 @@ Living tracker for the build. Update the status box + checklists as work lands. 
 
 ## Current status
 
-- **Phase:** 4 done + **Phase 5 KB engine** built, now **background + resumable**. Whole-book analysis (`deltaExtractor` + `kbRunner`) runs detached with an app-wide progress banner, big 300K chunks + JSON mode to dodge the rate limit, and **pause/auto-resume + checkpoint** so a rate-limit or app-close doesn't lose progress. **Pending on-device test.** Remaining Step B: series-assign import UX, `character/[id]` screen, cross-volume series view.
+- **Phase:** 4 done + **Phase 5 complete (engine + Step B UX)**, pending on-device test. Whole-book analysis (`deltaExtractor` + `kbRunner`) runs detached with an app-wide progress banner, big 300K chunks + JSON mode, pause/auto-resume + checkpoint. **Step B (2026-07-04):** series-assign on import (standalone / new / add-to-existing + volume) with a post-import "Analyze now?" hook, `seriesManager`, `character/[id]` profile screen, `series/[id]` cross-volume KB view, orphan-series cleanup on delete. Next: **Phase 6** (AI images + polish).
 - **2026-07-02 — bug-fix + player UX round (verified on emulator with a real EPUB):**
   - **Fixed chapter-nav crash:** `TtsForegroundService.onStartCommand` now calls `startForeground()` unconditionally before dispatching (every `startForegroundService()` start must, even ACTION_STOP — skipping it kills the app); `tts.stop()` no longer spins up the service when idle.
   - **Fixed silent first Play tap + ignored voice settings:** speak requests that race the async TTS engine init are stored (`pendingStart`) and replayed from the init callback; rate/pitch/voice are service fields applied inside `speakFrom()` so resume/replay/skip all honor them.
@@ -16,7 +16,7 @@ Living tracker for the build. Update the status box + checklists as work lands. 
   - **Player bar:** collapsible (pill bottom-left, mirrors KB banner's bottom-right pill), hosts the paragraph seek bar (moved out of the reader), sentence prev/next on tap + chapter on long-press, inline speed/pitch steppers + vi-VN voice picker (scroll-capped list).
   - **Reader:** bookmarked paragraphs get a left accent bar (loaded per chapter on focus); seek bar removed.
   - **Analysis banner:** explicit Cancel writes checkpoint status `cancelled` → no rehydrate on relaunch (rate-limit/app-kill still rehydrate); book detail Resume still works.
-- **Last updated:** 2026-07-02
+- **Last updated:** 2026-07-04
 - **App boots in Expo Go:** not yet verified on-device; Metro bundle compiles. Library/Reader/Settings tabs + Search/Bookmarks screens wired.
 
 ### Key environment decisions (locked)
@@ -127,11 +127,15 @@ First on-device test (import + basics work). Reworked the reading experience:
 - ✅ `app/book/[id].tsx` — "Story analysis" section: single **Analyze/Re-analyze full book** button with live `chunk i/N` progress; Power system + Character profiles read from the KB. `CharacterCard` = labeled `Giới tính/Vai trò/Sức mạnh/Thế lực/Biệt danh/Kỹ năng/Quan hệ/Tính cách/Trạng thái/Ngoại hình/Lai lịch`; `PowerStageRow` for tiers. **Collapsible sections** (feedback 2026-07-01): `Section`/`AISection` gained `collapsible`+`initialCollapsed` (tappable header + chevron); Story summary / Power system / Character profiles / Chapters default **collapsed** so the page isn't a wall of text (Tags + the Analyze control stay open).
 - ⚠️ tsc + lint clean; **needs on-device test** — real Gemini key, whole-book pass timing/quota on a long book, and JSON-shape robustness of the delta on live output. Uses each book's existing standalone series (no import-UX change yet).
 
-**Build order — Step B (Phase-5 UX, right after; engine already supports it):**
-- ⬜ `src/services/seriesManager.ts` — `createSeries(name)`, `assignBookToSeries(bookId, seriesId, vol)`, `getSeriesCandidates()` (positional DB API).
-- ⬜ Series-assign UX on import ("New series / add to existing (+ volume #) / standalone"), then `processVolume()` with progress while the user keeps reading.
-- ⬜ `app/character/[id].tsx` — character profile: accumulated current state + `character_events` timeline.
-- ⬜ Series view surfacing the full KB (power ladder, character roster, lore) across volumes.
+**Build order — Step B (Phase-5 UX) ✅ (built 2026-07-04, pending on-device test):**
+- ✅ `src/services/seriesManager.ts` — `createSeries(name)`, `assignBookToSeries(bookId, seriesId, vol)` (unlinks any previous series first — `book_series` PK is (bookId, seriesId), so a bare INSERT OR REPLACE into a different series would leave the old link), `getSeriesCandidates()` (name + volumeCount + suggested nextVolume, from `totalVolumesImported`).
+- ✅ **Two-phase import + series-assign UX.** `import.ts` split: `pickAndParseBook()` (pick → copy → parse → clean, nothing in DB) → `SeriesAssignModal` (`src/components/SeriesAssignModal.tsx`: Standalone / Start a new series (name prefilled, volume stepper) / Add to existing (candidate list + volume defaulting to nextVolume)) → `commitImport(staged, assignment)` (saveBook + series link + FTS) or `discardStagedImport` on cancel. After commit, an **"Analyze now?"** alert (only when Gemini key set) kicks `analyzeBook()` on the background kbRunner — banner shows progress while the user reads. Old one-shot `importBook()` removed.
+- ✅ **Orphan-series reaping** — `db.deleteBook` now drops any series left with zero volumes (plus its KB + checkpoint), so the "add to existing" picker doesn't fill with ghost 1-vol standalone series.
+- ✅ **kbRunner resume guard** — checkpoint resume now also requires `cp.bookId === bookId` (a paused checkpoint from another volume in the same series could otherwise skip the new volume's chunks on a coincidental chunk-count match).
+- ✅ `app/character/[id].tsx` — character profile screen: accumulated state (all labeled fields) + full `character_events` timeline; reached by tapping a `CharacterCard` on the book detail page or a roster row in the series view.
+- ✅ `app/series/[id].tsx` — series view: volume list (tap → book detail), power ladder, character roster (compact rows → character screen), world lore. Refreshes on focus (live during a background analysis). Linked from the book detail header ("Series · Tập N", shown only when the series has >1 volume).
+- ✅ Shared KB display components extracted to `src/components/CharacterProfile.tsx` (`CharacterCard`/`LifeHistory`/`Field`/`PowerStageRow`/`roleLabel`) — book detail page now imports them. `LifeHistory` prefixes events with "Tập N" when they span multiple volumes.
+- ⚠️ tsc + lint + Android bundle clean; **needs on-device test** (modal UX, multi-volume delta accumulation on a real 2-volume import, orphan reaping). NB: `.expo/types/router.d.ts` was hand-extended with the new routes — next `expo start` regenerates it.
 - ✅ **Background-ify the analysis + resume** (built 2026-07-01, after hitting the rate limit on a big book). Reading/TTS/music keep working during a run (network-I/O-bound; audio is native). Pieces:
   - **Bigger chunks** — `CHUNK_CHARS` 150K → **300K** + **JSON response mode** (`responseMimeType`) and a raised `maxOutputTokens` on the delta call, so far fewer requests (the free tier caps *requests/minute*, ~10–15). `runPrompt(prompt, opts)` gained `{ json, maxOutputTokens }`.
   - **Global background runner** — `src/services/kbRunner.ts` owns the chunk loop detached from any screen; `src/store/kbStore.ts` (zustand) mirrors job state; `src/components/KbProgressBanner.tsx` shows app-wide progress + Cancel/Resume/Dismiss on every screen. `useSeriesKB` rewritten to read the store (live per-chunk KB reload) + drive the runner. **Pacing** (`PACING_MS`) between chunks.
