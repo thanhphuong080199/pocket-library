@@ -122,7 +122,8 @@ export function initDB(): void {
       role TEXT,                -- 'protagonist' | 'antagonist' | 'supporting' | ...
       personality TEXT,
       status TEXT,              -- 'alive' | 'dead' | 'unknown' | ...
-      imageUrl TEXT,
+      imageUrl TEXT,            -- head-and-shoulders portrait (current form)
+      fullBodyUrl TEXT,         -- full-body standing illustration (current form)
       lastSeenVolume INTEGER,
       lastSeenChapter INTEGER
     );
@@ -176,6 +177,11 @@ export function initDB(): void {
   // already there — cheaper than forcing a data wipe on every schema addition.
   try {
     db.execSync("ALTER TABLE character_events ADD COLUMN imageUrl TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.execSync("ALTER TABLE characters ADD COLUMN fullBodyUrl TEXT");
   } catch {
     /* column already exists */
   }
@@ -780,6 +786,10 @@ export function updateCharacterImage(characterId: string, imageUrl: string): voi
   db.runSync("UPDATE characters SET imageUrl = ? WHERE id = ?", [imageUrl, characterId]);
 }
 
+export function updateCharacterFullBody(characterId: string, fullBodyUrl: string): void {
+  db.runSync("UPDATE characters SET fullBodyUrl = ? WHERE id = ?", [fullBodyUrl, characterId]);
+}
+
 // ---------------------------------------------------------------------------
 // Character events
 // ---------------------------------------------------------------------------
@@ -996,6 +1006,7 @@ export interface Character {
   personality?: string;
   status?: string;
   imageUrl?: string;
+  fullBodyUrl?: string;
   lastSeenVolume?: number;
   lastSeenChapter?: number;
 }

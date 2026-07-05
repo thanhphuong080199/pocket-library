@@ -12,7 +12,7 @@
  * stage portraits reuse the SAME seed + a shared base description, which is the
  * best face-consistency lever a stateless prompt→image URL service offers.
  */
-import { styleForGenre } from "@/src/constants/styleMap";
+import { pickStyleTag, styleForGenre } from "@/src/constants/styleMap";
 import type { Book, Character, CharacterEvent, Location } from "./db";
 import { isGeminiConfigured, runPrompt } from "./gemini";
 
@@ -71,11 +71,14 @@ export async function generateCoverUrl(book: Book): Promise<string> {
     "Viết một prompt tiếng Anh tả CẢNH minh hoạ bìa sách cho truyện này (không chữ, không tiêu đề trong ảnh). Dựa vào tên truyện và thể loại để tưởng tượng khung cảnh tiêu biểu.",
     `Tên truyện: ${book.title}${book.tags.length ? `\nThể loại: ${book.tags.join(", ")}` : ""}`,
   );
-  const prompt = `book cover illustration, ${scene}, ${styleForGenre(book.tags[0])}, no text`;
+  const prompt = `book cover illustration, ${scene}, ${styleForGenre(pickStyleTag(book.tags))}, no text`;
   return pollinationsUrl(prompt, { width: 400, height: 600, seed: seedFromId(book.id) });
 }
 
-/** Base English description of a character's current form (shared by portraits). */
+/**
+ * Base English description of a character's current form, framing-neutral so it
+ * can drive either a head-and-shoulders portrait or a full-body illustration.
+ */
 async function characterScene(c: Character, appearanceVi: string): Promise<string> {
   const bits = [
     `Tên: ${c.name}`,
@@ -86,22 +89,40 @@ async function characterScene(c: Character, appearanceVi: string): Promise<strin
     .filter(Boolean)
     .join("\n");
   return toEnglishPrompt(
-    "Viết một prompt tiếng Anh tả chân dung nhân vật này (khuôn mặt + nửa thân trên, đặc điểm cơ thể nổi bật). Không nêu tên riêng trong prompt.",
+    "Viết một prompt tiếng Anh tả ngoại hình nhân vật này (đặc điểm khuôn mặt, cơ thể, trang phục nổi bật). Không nêu tên riêng trong prompt.",
     bits,
   );
 }
 
 /**
- * Canonical portrait from the character's CURRENT appearance. Persist via
- * db.updateCharacterImage. `styleTag` = a book/series tag for the art style.
+ * Canonical portrait (head + upper body) from the character's CURRENT
+ * appearance. Persist via db.updateCharacterImage. `styleTag` = a book/series
+ * tag for the art style (see pickStyleTag).
  */
 export async function generateCharacterPortraitUrl(
   c: Character,
   styleTag?: string,
 ): Promise<string> {
   const scene = await characterScene(c, c.appearance ?? "");
-  const prompt = `character portrait, ${scene}, ${styleForGenre(styleTag)}`;
+  const prompt = `character portrait, head and shoulders, ${scene}, ${styleForGenre(styleTag)}`;
   return pollinationsUrl(prompt, { width: 400, height: 600, seed: seedFromId(c.id) });
+}
+
+/**
+ * Full-body standing illustration from the character's CURRENT appearance —
+ * taller canvas, head to toe. Same seed as the portrait so it reads as the same
+ * character. Persist via db.updateCharacterFullBody. `styleTag` = a book/series
+ * tag for the art style (see pickStyleTag).
+ */
+export async function generateCharacterFullBodyUrl(
+  c: Character,
+  styleTag?: string,
+): Promise<string> {
+  const scene = await characterScene(c, c.appearance ?? "");
+  const prompt =
+    `full body character illustration, standing, full figure head to toe, ` +
+    `${scene}, ${styleForGenre(styleTag)}`;
+  return pollinationsUrl(prompt, { width: 400, height: 720, seed: seedFromId(c.id) });
 }
 
 /**
@@ -116,7 +137,7 @@ export async function generateStagePortraitUrl(
   styleTag?: string,
 ): Promise<string> {
   const scene = await characterScene(c, event.description);
-  const prompt = `character portrait, ${scene}, ${styleForGenre(styleTag)}`;
+  const prompt = `character portrait, head and shoulders, ${scene}, ${styleForGenre(styleTag)}`;
   return pollinationsUrl(prompt, { width: 400, height: 600, seed: seedFromId(c.id) });
 }
 
