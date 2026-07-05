@@ -20,16 +20,19 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { Field, LifeHistory, roleLabel } from "@/src/components/CharacterProfile";
+import { pickStyleTag } from "@/src/constants/styleMap";
 import {
   getBooksInSeries,
   getCharacter,
   getCharacterEvents,
   getSeries,
   updateCharacterEventImage,
+  updateCharacterFullBody,
   updateCharacterImage,
   type CharacterEvent,
 } from "@/src/services/db";
 import {
+  generateCharacterFullBodyUrl,
   generateCharacterPortraitUrl,
   generateStagePortraitUrl,
 } from "@/src/services/imageAI";
@@ -50,13 +53,15 @@ export default function CharacterScreen() {
     () => (character ? getSeries(character.seriesId)?.name : undefined),
     [character],
   );
-  // Art style follows the series' first volume's first tag (STYLE_MAP).
+  // Art style follows the series' first volume's tags — a "Light Novel" (manga)
+  // tag overrides wherever it sits; otherwise the first tag (STYLE_MAP).
   const styleTag = useMemo(
-    () => (character ? getBooksInSeries(character.seriesId)[0]?.tags[0] : undefined),
+    () => (character ? pickStyleTag(getBooksInSeries(character.seriesId)[0]?.tags) : undefined),
     [character],
   );
 
   const [portraitBusy, setPortraitBusy] = useState(false);
+  const [fullBodyBusy, setFullBodyBusy] = useState(false);
   const [stageBusy, setStageBusy] = useState<string | null>(null);
 
   const makePortrait = useCallback(async () => {
@@ -70,6 +75,18 @@ export default function CharacterScreen() {
       setPortraitBusy(false);
     }
   }, [character, styleTag, portraitBusy, bump]);
+
+  const makeFullBody = useCallback(async () => {
+    if (!character || fullBodyBusy) return;
+    setFullBodyBusy(true);
+    try {
+      const url = await generateCharacterFullBodyUrl(character, styleTag);
+      updateCharacterFullBody(character.id, url);
+      bump();
+    } finally {
+      setFullBodyBusy(false);
+    }
+  }, [character, styleTag, fullBodyBusy, bump]);
 
   const makeStagePortrait = useCallback(
     async (event: CharacterEvent) => {
@@ -138,8 +155,36 @@ export default function CharacterScreen() {
                 {c.imageUrl ? "Tạo lại chân dung" : "Tạo chân dung AI"}
               </Text>
             </Pressable>
+            <Pressable
+              onPress={makeFullBody}
+              disabled={fullBodyBusy}
+              style={[styles.aiBtn, { borderColor: colors.muted, opacity: fullBodyBusy ? 0.6 : 1 }]}>
+              {fullBodyBusy ? (
+                <ActivityIndicator size="small" color={colors.text} />
+              ) : (
+                <Ionicons name="body-outline" size={15} color={colors.text} />
+              )}
+              <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                {c.fullBodyUrl ? "Tạo lại toàn thân" : "Tạo ảnh toàn thân"}
+              </Text>
+            </Pressable>
           </View>
         </View>
+
+        {/* Full-body illustration (current form) */}
+        {c.fullBodyUrl && (
+          <View style={{ marginTop: 16 }}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Toàn thân</Text>
+            <View style={[styles.fullBodyWrap, { backgroundColor: colors.muted }]}>
+              <Image
+                source={{ uri: c.fullBodyUrl }}
+                style={styles.portraitImg}
+                contentFit="cover"
+                transition={200}
+              />
+            </View>
+          </View>
+        )}
 
         {/* Profile fields */}
         <View style={[styles.card, { borderColor: colors.muted, marginTop: 16 }]}>
@@ -225,6 +270,13 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   portraitImg: { width: "100%", height: "100%" },
+  fullBodyWrap: {
+    width: 200,
+    aspectRatio: 400 / 720,
+    borderRadius: 10,
+    overflow: "hidden",
+    alignSelf: "center",
+  },
   headerInfo: { flex: 1, justifyContent: "center", gap: 4 },
   name: { fontSize: 24, fontWeight: "700" },
   series: { fontSize: 14 },

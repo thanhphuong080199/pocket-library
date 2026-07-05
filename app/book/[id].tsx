@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { pickStyleTag } from "@/src/constants/styleMap";
 import { CharacterCard, PowerStageRow } from "@/src/components/CharacterProfile";
 import { LocationCard } from "@/src/components/LocationCard";
 import { useBookAI, type AIFeature } from "@/src/hooks/useBookAI";
@@ -315,7 +316,7 @@ export default function BookDetailScreen() {
           )}
         </Section>
 
-        <LocationsSection kb={kb} genreTag={book.tags[0]} colors={colors} />
+        <LocationsSection kb={kb} genreTag={pickStyleTag(book.tags)} colors={colors} />
 
         {/* Chapter index (real) */}
         <Section title={`Danh sách chương (${titles.length})`} colors={colors} collapsible initialCollapsed>
