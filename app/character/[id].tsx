@@ -171,21 +171,6 @@ export default function CharacterScreen() {
           </View>
         </View>
 
-        {/* Full-body illustration (current form) */}
-        {c.fullBodyUrl && (
-          <View style={{ marginTop: 16 }}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Toàn thân</Text>
-            <View style={[styles.fullBodyWrap, { backgroundColor: colors.muted }]}>
-              <Image
-                source={{ uri: c.fullBodyUrl }}
-                style={styles.portraitImg}
-                contentFit="cover"
-                transition={200}
-              />
-            </View>
-          </View>
-        )}
-
         {/* Profile fields */}
         <View style={[styles.card, { borderColor: colors.muted, marginTop: 16 }]}>
           <Field label="Giới tính" value={c.gender} colors={colors} />
@@ -200,40 +185,31 @@ export default function CharacterScreen() {
           <Field label="Lai lịch" value={c.backstory} colors={colors} />
         </View>
 
-        {/* Stage gallery — one portrait per fundamental appearance change */}
-        {stages.length > 0 && (
+        {/* Character illustrations — every generated image in one gallery, each
+            captioned with what it depicts (portrait, full body, life stages).
+            Stage cards without an image yet offer an inline generate button. */}
+        {(c.imageUrl || c.fullBodyUrl || stages.length > 0) && (
           <View style={{ marginTop: 20 }}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Qua các giai đoạn</Text>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Minh hoạ nhân vật</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               <View style={styles.stageRow}>
+                {c.imageUrl && (
+                  <IllustrationCard uri={c.imageUrl} label="Chân dung" colors={colors} />
+                )}
+                {c.fullBodyUrl && (
+                  <IllustrationCard uri={c.fullBodyUrl} label="Toàn thân" colors={colors} />
+                )}
                 {stages.map((e) => (
-                  <View key={e.id} style={[styles.stageCard, { borderColor: colors.muted }]}>
-                    <View style={[styles.stageImgWrap, { backgroundColor: colors.muted }]}>
-                      {e.imageUrl ? (
-                        <Image source={{ uri: e.imageUrl }} style={styles.portraitImg} contentFit="cover" transition={200} />
-                      ) : (
-                        <Pressable
-                          onPress={() => makeStagePortrait(e)}
-                          disabled={stageBusy !== null}
-                          style={styles.stageGenBtn}>
-                          {stageBusy === e.id ? (
-                            <ActivityIndicator size="small" color="#fff" />
-                          ) : (
-                            <Ionicons name="color-palette-outline" size={22} color="#fff" />
-                          )}
-                          <Text style={styles.stageGenText}>Tạo ảnh</Text>
-                        </Pressable>
-                      )}
-                    </View>
-                    <Text style={[styles.stageMeta, { color: colors.muted }]}>
-                      {e.volume > 0 ? `Tập ${e.volume} · ` : ""}Chương {e.chapter + 1}
-                    </Text>
-                    <Text
-                      style={[styles.stageDesc, { color: colors.text }]}
-                      numberOfLines={3}>
-                      {e.description}
-                    </Text>
-                  </View>
+                  <IllustrationCard
+                    key={e.id}
+                    uri={e.imageUrl}
+                    label={e.description}
+                    sublabel={`${e.volume > 0 ? `Tập ${e.volume} · ` : ""}Chương ${e.chapter + 1}`}
+                    colors={colors}
+                    onGenerate={() => makeStagePortrait(e)}
+                    busy={stageBusy === e.id}
+                    disabled={stageBusy !== null}
+                  />
                 ))}
               </View>
             </ScrollView>
@@ -255,6 +231,52 @@ export default function CharacterScreen() {
   );
 }
 
+/**
+ * One card in the "Minh hoạ nhân vật" gallery: an illustration with a caption
+ * label under it saying what it depicts. When `uri` is missing but `onGenerate`
+ * is given (stage images), the image slot becomes a tap-to-generate button.
+ */
+function IllustrationCard({
+  uri,
+  label,
+  sublabel,
+  colors,
+  onGenerate,
+  busy,
+  disabled,
+}: {
+  uri?: string;
+  label: string;
+  sublabel?: string;
+  colors: { text: string; muted: string };
+  onGenerate?: () => void;
+  busy?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <View style={[styles.stageCard, { borderColor: colors.muted }]}>
+      <View style={[styles.stageImgWrap, { backgroundColor: colors.muted }]}>
+        {uri ? (
+          <Image source={{ uri }} style={styles.portraitImg} contentFit="cover" transition={200} />
+        ) : onGenerate ? (
+          <Pressable onPress={onGenerate} disabled={disabled} style={styles.stageGenBtn}>
+            {busy ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Ionicons name="color-palette-outline" size={22} color="#fff" />
+            )}
+            <Text style={styles.stageGenText}>Tạo ảnh</Text>
+          </Pressable>
+        ) : null}
+      </View>
+      {!!sublabel && <Text style={[styles.stageMeta, { color: colors.muted }]}>{sublabel}</Text>}
+      <Text style={[styles.stageDesc, { color: colors.text }]} numberOfLines={3}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { alignItems: "center", justifyContent: "center" },
@@ -270,13 +292,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   portraitImg: { width: "100%", height: "100%" },
-  fullBodyWrap: {
-    width: 200,
-    aspectRatio: 400 / 720,
-    borderRadius: 10,
-    overflow: "hidden",
-    alignSelf: "center",
-  },
   headerInfo: { flex: 1, justifyContent: "center", gap: 4 },
   name: { fontSize: 24, fontWeight: "700" },
   series: { fontSize: 14 },

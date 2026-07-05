@@ -39,6 +39,12 @@ export interface AIFeature<T> {
   generate: () => void;
   /** Force a fresh Gemini call, ignoring the cache. */
   regenerate: () => void;
+  /**
+   * Overwrite the value by hand (no Gemini call) and persist it exactly like a
+   * fresh result — updates ai_cache, runs `persist`/`onData`. Lets the user
+   * treat AI output as an editable suggestion (e.g. add/remove tags manually).
+   */
+  set: (value: T) => void;
 }
 
 /**
@@ -144,7 +150,18 @@ function useAIFeature<T>(config: {
   const generate = useCallback(() => void run(false), [run]);
   const regenerate = useCallback(() => void run(true), [run]);
 
-  return { data, status, error, generate, regenerate };
+  const set = useCallback((value: T) => {
+    const c = cfg.current;
+    const b = c.book;
+    if (!b) return;
+    setAICache(b.id, c.cacheKey, c.toCache(value));
+    c.persist?.(b, value);
+    setData(value);
+    c.onData?.(value);
+    setStatus("done");
+  }, []);
+
+  return { data, status, error, generate, regenerate, set };
 }
 
 /**

@@ -19,7 +19,7 @@ import {
   updateBookCover,
 } from "@/src/services/db";
 import { deriveLocations } from "@/src/services/deltaExtractor";
-import { TAG_LABELS_VI } from "@/src/services/gemini";
+import { ALLOWED_TAGS, TAG_LABELS_VI, type BookTag } from "@/src/services/gemini";
 import { generateCoverUrl } from "@/src/services/imageAI";
 import { cancelAnalysis } from "@/src/services/kbRunner";
 import { useBookStore } from "@/src/store/bookStore";
@@ -183,24 +183,8 @@ export default function BookDetailScreen() {
           </Pressable>
         </View>
 
-        {/* Tags (AI auto-tagging) */}
-        <AISection
-          title="Thể loại"
-          feature={ai.tags}
-          colors={colors}
-          isEmpty={(t) => t.length === 0}
-          emptyHint="Chưa có thể loại — phân tích để tự gắn thể loại & tâm trạng (đồng thời chọn nhạc nền)."
-          noun="thể loại">
-          {(tags) => (
-            <View style={styles.tagRow}>
-              {tags.map((t) => (
-                <View key={t} style={[styles.tag, { borderColor: colors.muted }]}>
-                  <Text style={{ color: colors.text, fontSize: 13 }}>{TAG_LABELS_VI[t] ?? t}</Text>
-                </View>
-              ))}
-            </View>
-          )}
-        </AISection>
+        {/* Tags — AI suggests them, but they're editable by hand (add/remove). */}
+        <TagsSection feature={ai.tags} colors={colors} />
 
         <AISection
           title="Tóm tắt truyện"
@@ -528,6 +512,90 @@ function AISection<T>({
   );
 }
 
+/**
+ * Genre/mood tags. AI-generated tags are only *suggestions*: each shows a remove
+ * (×) chip, and an "Thêm" toggle reveals the rest of the closed vocabulary
+ * (ALLOWED_TAGS) to add. Edits persist immediately via `feature.set` (cache +
+ * books.tags + store), so background-music/art-style pickers see them at once.
+ */
+function TagsSection({
+  feature,
+  colors,
+}: {
+  feature: AIFeature<BookTag[]>;
+  colors: SectionColors;
+}) {
+  const { data: tags, status, error, generate, regenerate, set } = feature;
+  const loading = status === "loading";
+  const [adding, setAdding] = useState(false);
+  const available = ALLOWED_TAGS.filter((t) => !tags.includes(t));
+
+  const remove = (t: BookTag) => set(tags.filter((x) => x !== t));
+  const add = (t: BookTag) => {
+    set([...tags, t]);
+    if (available.length <= 1) setAdding(false); // that was the last one
+  };
+
+  return (
+    <Section title="Thể loại" colors={colors}>
+      {tags.length === 0 && (
+        <Text style={[styles.placeholder, { color: colors.muted }]}>
+          Chưa có thể loại — phân tích để tự gắn thể loại & tâm trạng (đồng thời chọn nhạc nền), hoặc
+          tự thêm bên dưới.
+        </Text>
+      )}
+
+      <View style={[styles.tagRow, { marginTop: tags.length === 0 ? 12 : 0 }]}>
+        {tags.map((t) => (
+          <View key={t} style={[styles.tag, styles.tagEditable, { borderColor: colors.muted }]}>
+            <Text style={{ color: colors.text, fontSize: 13 }}>{TAG_LABELS_VI[t] ?? t}</Text>
+            <Pressable onPress={() => remove(t)} hitSlop={8}>
+              <Ionicons name="close" size={14} color={colors.muted} />
+            </Pressable>
+          </View>
+        ))}
+        {available.length > 0 && (
+          <Pressable
+            onPress={() => setAdding((a) => !a)}
+            style={[styles.tag, styles.tagEditable, { borderColor: colors.muted }]}>
+            <Ionicons name={adding ? "chevron-up" : "add"} size={14} color={colors.text} />
+            <Text style={{ color: colors.text, fontSize: 13 }}>Thêm</Text>
+          </Pressable>
+        )}
+      </View>
+
+      {adding && available.length > 0 && (
+        <View style={[styles.tagRow, { marginTop: 10 }]}>
+          {available.map((t) => (
+            <Pressable
+              key={t}
+              onPress={() => add(t)}
+              style={[styles.tag, styles.tagAdd, { borderColor: colors.muted }]}>
+              <Text style={{ color: colors.muted, fontSize: 13 }}>{TAG_LABELS_VI[t] ?? t}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+
+      <Pressable
+        onPress={tags.length > 0 ? regenerate : generate}
+        disabled={loading}
+        style={[styles.aiBtn, styles.aiBtnInline, { borderColor: colors.muted, opacity: loading ? 0.6 : 1 }]}>
+        {loading ? (
+          <ActivityIndicator size="small" color={colors.text} />
+        ) : (
+          <Ionicons name="sparkles-outline" size={16} color={colors.text} />
+        )}
+        <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+          {loading ? "Đang phân tích…" : tags.length > 0 ? "Tạo lại thể loại" : "Tạo thể loại bằng AI"}
+        </Text>
+      </Pressable>
+
+      {status === "error" && <Text style={[styles.aiError, { color: "#c0392b" }]}>{error}</Text>}
+    </Section>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { alignItems: "center", justifyContent: "center" },
@@ -579,6 +647,8 @@ const styles = StyleSheet.create({
   seriesLinkText: { fontSize: 13, fontWeight: "600", flexShrink: 1 },
   tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   tag: { borderWidth: 1, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 5 },
+  tagEditable: { flexDirection: "row", alignItems: "center", gap: 6 },
+  tagAdd: { borderStyle: "dashed", flexDirection: "row", alignItems: "center", gap: 4 },
   aiBtn: {
     flexDirection: "row",
     alignItems: "center",

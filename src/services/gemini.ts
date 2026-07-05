@@ -42,8 +42,11 @@ You are analyzing Vietnamese web novels and books.
 `.trim();
 
 /**
- * Closed tag vocabulary. Intentionally identical to the keys of MUSIC_MAP so a
- * book's AI tags map straight onto background music with no translation layer.
+ * Closed tag vocabulary. Most entries mirror the keys of MUSIC_MAP so a book's
+ * AI tags map straight onto background music with no translation layer. The
+ * exception is "light novel", a *format* tag (not a mood): it has no MUSIC_MAP
+ * entry — music.ts simply ignores tags it doesn't recognize — but it drives the
+ * manga/anime art style via STYLE_MAP/pickStyleTag.
  */
 export const ALLOWED_TAGS = [
   "action",
@@ -60,6 +63,7 @@ export const ALLOWED_TAGS = [
   "xianxia",
   "thriller",
   "slice-of-life",
+  "light novel",
 ] as const;
 
 export type BookTag = (typeof ALLOWED_TAGS)[number];
@@ -84,6 +88,7 @@ export const TAG_LABELS_VI: Record<BookTag, string> = {
   xianxia: "Tiên hiệp",
   thriller: "Giật gân",
   "slice-of-life": "Đời thường",
+  "light novel": "Light Novel",
 };
 
 /** Raised for any Gemini call failure so callers can show a clean message. */
@@ -304,7 +309,15 @@ export async function generateTags(textSample: string): Promise<BookTag[]> {
 Read this story excerpt and return ONLY a JSON array of mood/genre tags.
 Choose strictly from this list: ${ALLOWED_TAGS.join(", ")}.
 Use at most 4 tags, most relevant first. Do not invent tags outside the list.
-Return raw JSON only, e.g. ["action", "fantasy", "cultivation"].
+
+Note on "light novel": this is a FORMAT tag for Japanese-style light novels (or
+works written in that style) — signs include Japanese character/place names,
+isekai/reincarnation premises, high-school or academy settings, RPG-like status
+screens/skills, and a breezy dialogue-heavy narration. Add "light novel"
+alongside the genre/mood tags whenever the excerpt reads like one; it is NOT a
+substitute for the mood tags.
+
+Return raw JSON only, e.g. ["light novel", "action", "fantasy"].
 
 Text:
 ${textSample}
