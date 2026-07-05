@@ -89,7 +89,12 @@ async function characterScene(c: Character, appearanceVi: string): Promise<strin
     .filter(Boolean)
     .join("\n");
   return toEnglishPrompt(
-    "Viết một prompt tiếng Anh tả ngoại hình nhân vật này (đặc điểm khuôn mặt, cơ thể, trang phục nổi bật). Không nêu tên riêng trong prompt.",
+    "Viết một prompt tiếng Anh tả ngoại hình nhân vật này. QUAN TRỌNG: căn cứ vào ngoại hình/chủng " +
+      "loài được mô tả để xác định nhân vật có phải con người hay không. Nếu KHÔNG phải con người " +
+      "(thú, yêu thú, linh thú, rồng, quái vật, robot, tinh linh… hay bất kỳ loài phi nhân nào), hãy " +
+      "khắc hoạ ĐÚNG là sinh vật/loài đó và nêu rõ ở đầu prompt (ví dụ 'a giant white tiger', 'a nine-" +
+      "tailed fox'), TUYỆT ĐỐI không vẽ thành người. Nếu là con người thì tả đặc điểm khuôn mặt, cơ " +
+      "thể, trang phục nổi bật. Không nêu tên riêng trong prompt.",
     bits,
   );
 }
